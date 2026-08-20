@@ -1,0 +1,31 @@
+<div id="grid" hx-get="/nodes" hx-trigger="every 2s" hx-swap="outerHTML">
+  {% for flash in flashes %}
+  <p class="flash flash-{{ flash.level }}">{{ flash.text }}</p>
+  {% endfor %}
+
+  {% if quorum.warning %}
+  <p class="banner">
+    {{ quorum.warning }}
+    <span class="banner-note">
+      Counted from the VMs managed here, so it cannot see etcd members left behind
+      by earlier kills — treat it as a hint, not the truth. Prune Nodes tidies the
+      Kubernetes side; Reset rebuilds the cluster.
+    </span>
+  </p>
+  {% endif %}
+
+  {% if not nodes %}
+  <p class="empty">
+    No nodes yet. Deploy a control plane node first — it bootstraps the cluster,
+    and workers can join once it reports <code>configured</code>.
+  </p>
+  {% else %}
+  <div class="cards">
+    {% for node in nodes %}{% include "_card.html" %}{% endfor %}
+  </div>
+  {% endif %}
+
+  {% if at_capacity %}
+  <p class="empty">Node limit of {{ cfg.vm.max_nodes }} reached — kill one to make room.</p>
+  {% endif %}
+</div>

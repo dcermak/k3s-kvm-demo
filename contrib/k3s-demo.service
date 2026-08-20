@@ -1,0 +1,36 @@
+[Unit]
+Description=k3s KVM demo dashboard
+Documentation=https://github.com/SUSE-Rancher-Community/k3s-kvm-demo
+# Socket activation means the daemon need not already be running, but the
+# socket must exist before we try to connect.
+After=network.target virtqemud.socket
+Wants=virtqemud.socket
+
+[Service]
+Type=exec
+# The user must be able to write to qemu:///system: on most distributions that
+# means membership of the 'libvirt' group.
+User=k3sdemo
+Group=k3sdemo
+SupplementaryGroups=libvirt
+WorkingDirectory=/opt/k3s-kvm-demo
+Environment=K3S_DEMO_CONFIG=/etc/k3s-kvm-demo/config.toml
+ExecStart=/usr/bin/uv run --frozen k3s-demo serve
+Restart=always
+RestartSec=5s
+
+# The app holds a whole-process singleton lock, so a second instance would
+# fail to start rather than corrupt anything. Give it a stable runtime dir for
+# that lock.
+RuntimeDirectory=k3s-kvm-demo
+Environment=XDG_RUNTIME_DIR=/run/k3s-kvm-demo
+
+# It only ever talks to libvirt over a local socket and serves loopback.
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/k3s-kvm-demo
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

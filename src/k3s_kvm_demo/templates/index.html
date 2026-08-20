@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KVM Node Registry — k3s demo</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+<main class="page">
+  <header class="page-header">
+    <div>
+      <h1>KVM Node Registry</h1>
+      <p class="subtitle">
+        k3s nodes running as libvirt guests on this machine
+        &middot; up to {{ cfg.vm.max_nodes }} nodes
+      </p>
+    </div>
+    <nav class="actions">
+      <button class="btn btn-primary"
+              hx-post="/deploy/agent" hx-target="#grid" hx-swap="outerHTML"
+              hx-disabled-elt="this">
+        <span aria-hidden="true">＋</span> Deploy Node
+      </button>
+      <button class="btn btn-tertiary"
+              hx-post="/deploy/server" hx-target="#grid" hx-swap="outerHTML"
+              hx-disabled-elt="this">
+        <span aria-hidden="true">⬡</span> Deploy Control Plane node
+      </button>
+      <button class="btn btn-ghost"
+              hx-post="/prune-nodes" hx-target="#grid" hx-swap="outerHTML"
+              hx-disabled-elt="this"
+              hx-confirm="Delete Kubernetes Node objects for VMs that no longer exist? This does not remove etcd members.">
+        Prune Nodes
+      </button>
+      <button class="btn btn-ghost btn-danger-ghost"
+              hx-post="/reset" hx-target="#grid" hx-swap="outerHTML"
+              hx-disabled-elt="this"
+              hx-confirm="Destroy every demo VM and its disk, and start over?">
+        Reset
+      </button>
+    </nav>
+  </header>
+
+  {% include "_grid.html" %}
+</main>
+</body>
+</html>

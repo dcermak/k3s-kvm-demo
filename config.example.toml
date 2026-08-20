@@ -1,0 +1,73 @@
+# k3s-kvm-demo configuration.
+#
+# Copy to config.toml and edit. Validate with:  uv run k3s-demo check
+
+[server]
+# Must be a loopback address. This API destroys VMs and runs root commands
+# inside guests with no authentication; listening off-host is refused, not
+# merely warned about.
+bind = "127.0.0.1"
+port = 8000
+# Host headers the dashboard will accept mutating requests from. Loopback
+# binding alone does not stop a page on another origin POSTing here.
+allowed_hosts = ["127.0.0.1:8000", "localhost:8000"]
+
+[libvirt]
+uri = "qemu:///system"
+# A pool used by nothing else. Create it with:  uv run k3s-demo init-pool
+# Startup refuses to run unless the pool carries the marker volume that
+# command writes, and refuses again if it finds a volume it cannot account
+# for — the app deletes disks in here.
+pool = "k3s-demo"
+network = "default"
+
+[vm]
+# The golden image: k3s and qemu-guest-agent already installed, neither k3s
+# unit enabled, no /var/lib/rancher/k3s, no /etc/machine-id. See the Readme,
+# or scripts/build-image.sh for a recipe. Keep it OUTSIDE the demo pool.
+base_image = "/var/lib/libvirt/images/k3s-base.qcow2"
+# Overlay capacity. Must be at least the base image's virtual size.
+disk_gb = 20
+memory_mb = 2048
+vcpus = 2
+# Node names are "<name_prefix>-<32 hex>"; the hex is the domain UUID.
+name_prefix = "k3s-node"
+# A hard ceiling so a visitor cannot exhaust the booth machine.
+max_nodes = 8
+
+[cluster]
+# Pre-shared join secret, used by every node. Change it.
+token = "booth-demo-please-change-me"
+# Extra Subject Alternative Names for the control plane certificate, e.g. a
+# fixed VIP you want kubectl to reach the cluster through.
+tls_san = []
+
+[firstboot]
+# Rendered per node and piped to /bin/sh in the guest over the guest agent.
+script = "firstboot/firstboot.sh.j2"
+# How long to wait for the guest agent to answer guest-ping after boot.
+boot_timeout_s = 180
+# Wall clock for the whole firstboot run, including waiting for k3s to come up.
+exec_timeout_s = 300
+# Per guest-agent command.
+qga_timeout_s = 10
+# Re-execution schedule when firstboot exits 75 (another run holds the
+# guest-side lock). The last value repeats until exec_timeout_s runs out.
+retry_backoff_s = [2, 5, 10, 30]
+# Captured guest output is tail-trimmed to this before being shown.
+log_tail_bytes = 8192
+
+[maintenance]
+# Delete overlays that no domain claims. Off by default: it is destructive,
+# and a misconfigured pool would lose data. When on, a volume must also be
+# unclaimed for orphan_min_age_s and seen unclaimed on two consecutive passes,
+# and no domain on the host may reference it.
+reap_orphans = false
+orphan_min_age_s = 600
+# How long shutdown waits for in-flight guest-agent calls before giving up and
+# exiting anyway. The libvirt connection is left open if a worker is still in
+# it — closing underneath one would be worse than leaking it.
+shutdown_grace_s = 30
+# How many times to retry probing a node's k3s unit before saying so on the
+# card instead of pretending to still be trying.
+service_probe_attempts = 20

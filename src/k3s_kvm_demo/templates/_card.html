@@ -1,0 +1,73 @@
+{% set tone = {
+     'configured': 'ok',
+     'booting': 'busy',
+     'configuring': 'busy',
+     'creating': 'busy',
+     'deleting': 'busy',
+     'failed': 'bad',
+   }.get(node.state, 'unknown') %}
+<article class="card card-{{ tone }}">
+  <header class="card-head">
+    <span class="role role-{{ node.role }}" aria-hidden="true">
+      {{ '⬡' if node.is_server else '▢' }}
+    </span>
+    <div class="identity">
+      <h2 class="node-name" title="{{ node.name }}">{{ node.short_name }}</h2>
+      <p class="role-label">
+        {{ 'control plane' if node.is_server else 'worker' }}{% if node.bootstrap %} &middot; bootstrap{% endif %}
+      </p>
+    </div>
+    <span class="power">{{ node.power }}</span>
+  </header>
+
+  <p class="state">
+    <span class="dot dot-{{ tone }}" aria-hidden="true"></span>
+    <span class="state-name">{{ node.state }}</span>
+    {% if not node.known_state %}<span class="state-note">unrecognised — left alone</span>{% endif %}
+    {% if node.state == 'configured' %}
+    <span class="state-note">k3s unit {{ node.service }}</span>
+    {% endif %}
+  </p>
+
+  {% if node.progress %}
+  <p class="progress">{{ node.progress }}</p>
+  {% endif %}
+
+  <dl class="facts">
+    <div><dt>address</dt><dd>{{ node.ip or '—' }}</dd></div>
+    <div><dt>vcpu</dt><dd>{{ node.vcpus }}</dd></div>
+    <div><dt>memory</dt><dd>{{ node.memory_mb }} MiB</dd></div>
+    {% if node.cpu_percent is not none %}
+    <div><dt>cpu</dt><dd>{{ '%.0f'|format(node.cpu_percent) }}%</dd></div>
+    {% endif %}
+    {% if node.mem_percent is not none %}
+    <div><dt>mem</dt><dd>{{ '%.0f'|format(node.mem_percent) }}%</dd></div>
+    {% endif %}
+    {% if node.kubelet is not none %}
+    <div><dt>kubelet</dt><dd>{{ node.kubelet }}</dd></div>
+    {% endif %}
+  </dl>
+
+  {% if node.error %}
+  <p class="error">{{ node.error }}</p>
+  {% endif %}
+
+  {% if node.log %}
+  <details class="log">
+    <summary>firstboot output</summary>
+    <pre>{{ node.log }}</pre>
+  </details>
+  {% elif node.state == 'failed' %}
+  <p class="log-note">Output was not retained across a restart; the reason above is all we kept.</p>
+  {% endif %}
+
+  <footer class="card-foot">
+    <button class="btn btn-kill"
+            hx-post="/nodes/{{ node.name }}/kill"
+            hx-target="#grid" hx-swap="outerHTML"
+            hx-disabled-elt="this"
+            hx-confirm="Kill {{ node.short_name }}? The VM is destroyed immediately and its disk is deleted.">
+      Kill node
+    </button>
+  </footer>
+</article>

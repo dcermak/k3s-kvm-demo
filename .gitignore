@@ -1,0 +1,9 @@
+# Local configuration, which carries the cluster token.
+/config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/

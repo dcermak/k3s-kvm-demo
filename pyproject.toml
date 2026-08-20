@@ -1,0 +1,55 @@
+[project]
+name = "k3s-kvm-demo"
+version = "0.1.0"
+description = "Booth dashboard for running k3s nodes as KVM guests"
+readme = "Readme.md"
+requires-python = ">=3.11"
+license = { text = "GPL-2.0-or-later" }
+dependencies = [
+    "fastapi>=0.110",
+    "jinja2>=3.1",
+    "libvirt-python>=9.0",
+    "uvicorn>=0.27",
+]
+
+[project.scripts]
+k3s-demo = "k3s_kvm_demo.cli:main"
+
+[dependency-groups]
+dev = [
+    # starlette.testclient wants httpx2; plain httpx still works but warns,
+    # and the suite treats warnings as errors.
+    "httpx2>=2.12",
+    "pytest>=8.0",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/k3s_kvm_demo"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "RUF", "BLE", "S701"]
+ignore = [
+    # Deliberate: the guard exists so the caller learns, not so it is silenced.
+    "B904",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Depends() in a default is the FastAPI idiom.
+"src/k3s_kvm_demo/app.py" = ["B008"]
+# Tests reach into internals on purpose and use assert freely.
+"tests/*" = ["S101", "SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+filterwarnings = ["error"]
