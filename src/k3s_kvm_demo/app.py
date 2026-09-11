@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import libvirt
 from fastapi import Depends, FastAPI, Request
@@ -25,12 +26,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import cluster, guestexec, libvirtctl, meta, pool as poolmod, stats
+from . import cluster, guestexec, libvirtctl, meta, pool as poolmod, seed, stats
 from .config import Config
 from .conn import ConnectionManager, SingletonLock
 from .libvirtctl import DeployRefused, NodeManager, NodeNotFound
-from .provision import Provisioner
-from .workers import NotAccepting, QueueFull
+from .observer import Observer
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class Flash:
     level: str
     text: str
     expires_at: float
+    id: str = field(default_factory=lambda: uuid4().hex)
 
 
 class Flashes:
@@ -71,127 +72,51 @@ class Flashes:
 
 
 @dataclass
-class Quorum:
-    servers: int
-    running: int
-    needed: int
-    warning: str | None = None
-
-
-def assess_quorum(nodes: list[libvirtctl.Node]) -> Quorum:
-    """Advisory only.
-
-    Derived from the VMs this app manages, which cannot see etcd members left
-    behind by earlier kills, so it can understate the real member count.  The
-    template says so; nothing is ever refused on the strength of it.
-    """
-    servers = [node for node in nodes if node.is_server]
-    running = [node for node in servers if node.running]
-    needed = len(servers) // 2 + 1 if servers else 0
-
-    warning = None
-    if servers and len(running) < needed:
-        warning = (
-            f"{len(running)} of {len(servers)} control plane nodes are running; "
-            f"etcd needs {needed} for quorum. The cluster is down until enough return."
-        )
-    elif len(servers) > 1 and len(servers) % 2 == 0:
-        warning = (
-            f"{len(servers)} control plane nodes is an even number; etcd tolerates no "
-            "more failures than an odd count one lower. Add or remove one."
-        )
-    return Quorum(servers=len(servers), running=len(running), needed=needed, warning=warning)
-
-
-@dataclass
 class AppState:
     cfg: Config
     cm: ConnectionManager
     manager: NodeManager
-    provisioner: Provisioner
+    observer: Observer
     singleton: SingletonLock | None = None
-    orphans: poolmod.OrphanTracker | None = None
     flashes: Flashes = field(default_factory=Flashes)
 
     def startup(self) -> None:
         self.cm.open()
+        self.manager.check_compatible()
         if not self.cfg.libvirt.is_test_driver:
-            self.cm.read(
-                lambda conn: poolmod.require_owned(
-                    conn.storagePoolLookupByName(self.cfg.libvirt.pool),
-                    self.cfg.vm.name_prefix,
-                )
-            )
-        self.provisioner.start()
+            self.manager.require_owned_pool()
+        self.observer.start()
 
     def shutdown(self) -> None:
-        drained = self.provisioner.shutdown()
+        drained = self.observer.shutdown()
         if drained:
-            self.cm.close()
+            drained = self.cm.close()
         else:
             # A worker is still inside a libvirt or guest-agent call; closing
             # the connection under it would be a use-after-free. Daemon threads
             # mean the process still exits promptly.
             log.warning("shutting down with work in flight; leaving the connection open")
-        if self.singleton is not None:
+        if drained and self.singleton is not None:
             self.singleton.release()
 
     def snapshot(self) -> list[libvirtctl.Node]:
         nodes = self.manager.list_nodes()
-        nodes = self.provisioner.decorate(nodes)
+        nodes = self.observer.decorate(nodes)
         return stats.enrich(self.cm, nodes)
-
-    def reap_orphans(self) -> list[str]:
-        """Delete overlays nothing claims, when configuration allows it."""
-        if self.orphans is None:
-            return []
-        try:
-            unclaimed = self.manager.unclaimed_volumes()
-        except libvirt.libvirtError:
-            log.debug("could not list unclaimed volumes", exc_info=True)
-            return []
-        eligible = self.orphans.observe(unclaimed)
-        if not eligible:
-            return []
-        if not self.cfg.maintenance.reap_orphans:
-            log.warning(
-                "unclaimed overlays in pool %s: %s (maintenance.reap_orphans is off; "
-                "remove them with: virsh -c %s vol-delete --pool %s <name>)",
-                self.cfg.libvirt.pool,
-                ", ".join(eligible),
-                self.cfg.libvirt.uri,
-                self.cfg.libvirt.pool,
-            )
-            return []
-        removed = []
-        for volume in eligible:
-            try:
-                self.manager.delete_volume(volume)
-            except (libvirt.libvirtError, ValueError):
-                log.exception("could not delete orphan volume %s", volume)
-            else:
-                self.orphans.forget(volume)
-                removed.append(volume)
-        if removed:
-            log.warning("deleted orphan overlay(s): %s", ", ".join(removed))
-        return removed
 
 
 def build_state(cfg: Config) -> AppState:
-    singleton = SingletonLock()
+    singleton = SingletonLock(cfg.server.lock_path)
     singleton.acquire()
     cm = ConnectionManager(cfg.libvirt.uri)
     manager = NodeManager(cm, cfg)
-    state = AppState(
+    return AppState(
         cfg=cfg,
         cm=cm,
         manager=manager,
-        provisioner=None,  # type: ignore[arg-type]
+        observer=Observer(manager, cfg),
         singleton=singleton,
-        orphans=poolmod.OrphanTracker(min_age_s=cfg.maintenance.orphan_min_age_s),
     )
-    state.provisioner = Provisioner(manager, cfg, maintenance=state.reap_orphans)
-    return state
 
 
 def get_state(request: Request) -> AppState:
@@ -218,8 +143,8 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
     async def lifespan(app: FastAPI):
         state = factory()
         app.state.k3s = state
-        state.startup()
         try:
+            state.startup()
             yield
         finally:
             state.shutdown()
@@ -227,20 +152,31 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
     app = FastAPI(title="k3s KVM demo", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
+    @app.exception_handler(meta.CompatibilityError)
+    async def incompatible(request: Request, exc: meta.CompatibilityError):
+        return PlainTextResponse(str(exc), status_code=409)
+
     @app.middleware("http")
     async def guard_unsafe_methods(request: Request, call_next):
         if request.method not in SAFE_METHODS and not _host_allowed(cfg, request):
             return PlainTextResponse("cross-origin request rejected", status_code=403)
         return await call_next(request)
 
-    def grid(request: Request, state: AppState) -> HTMLResponse:
-        nodes = state.snapshot()
+    def render(
+        request: Request,
+        state: AppState,
+        name: str = "_grid.html",
+        nodes: list[libvirtctl.Node] | None = None,
+    ) -> HTMLResponse:
+        """The one render path.  *nodes* reuses a listing the caller already has."""
+        if nodes is None:
+            nodes = state.snapshot()
         return TEMPLATES.TemplateResponse(
             request=request,
-            name="_grid.html",
+            name=name,
             context={
                 "nodes": nodes,
-                "quorum": assess_quorum(nodes),
+                "quorum": cluster.assess_quorum(nodes),
                 "flashes": state.flashes.current(),
                 "cfg": state.cfg,
                 "at_capacity": len(nodes) >= state.cfg.vm.max_nodes,
@@ -249,46 +185,61 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request, state: AppState = Depends(get_state)) -> HTMLResponse:
-        nodes = state.snapshot()
-        return TEMPLATES.TemplateResponse(
-            request=request,
-            name="index.html",
-            context={
-                "nodes": nodes,
-                "quorum": assess_quorum(nodes),
-                "flashes": state.flashes.current(),
-                "cfg": state.cfg,
-                "at_capacity": len(nodes) >= state.cfg.vm.max_nodes,
-            },
-        )
+        return render(request, state, "index.html")
 
     @app.get("/nodes", response_class=HTMLResponse)
     def list_nodes(request: Request, state: AppState = Depends(get_state)) -> HTMLResponse:
-        return grid(request, state)
+        return render(request, state)
+
+    @app.post("/kubeconfig/{action}")
+    def kubeconfig(request: Request, action: str, state: AppState = Depends(get_state)):
+        headers = {"Cache-Control": "no-store"}
+        if action not in {"download", "copy"}:
+            return PlainTextResponse("unknown export action", status_code=404, headers=headers)
+        text, error = None, None
+        try:
+            text = cluster.export_kubeconfig(
+                state.manager.list_nodes(),
+                lambda uuid: guestexec.QemuAgent(
+                    state.cm, uuid, timeout_s=state.cfg.observation.qga_timeout_s
+                ),
+            )
+        except cluster.KubeconfigExportError as exc:
+            error = str(exc)
+        except (libvirt.libvirtError, meta.CompatibilityError, poolmod.PoolError):
+            error = "could not discover control plane nodes"
+        if action == "download" and error is None:
+            return PlainTextResponse(
+                text,
+                media_type="application/yaml",
+                headers={**headers, "Content-Disposition": 'attachment; filename="k3s-demo.yaml"'},
+            )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="_kubeconfig.html",
+            context={"kubeconfig": text, "error": error, "download": action == "download"},
+            status_code=503 if action == "download" else 200,
+            headers=headers,
+        )
 
     @app.post("/deploy/{role}", response_class=HTMLResponse)
     def deploy(request: Request, role: str, state: AppState = Depends(get_state)) -> HTMLResponse:
         if role not in meta.ROLES:
             state.flashes.add("error", f"unknown role {role!r}")
-            return grid(request, state)
+            return render(request, state)
         try:
-            node, server_url = state.manager.create(role)
-        except (DeployRefused, poolmod.PoolError) as exc:
+            node = state.manager.create(role)
+        except (DeployRefused, poolmod.PoolError, seed.SeedError) as exc:
             state.flashes.add("error", str(exc))
-            return grid(request, state)
+            return render(request, state)
         except libvirt.libvirtError as exc:
             log.exception("deploy failed")
             state.flashes.add("error", f"libvirt refused to create the node: {exc}")
-            return grid(request, state)
+            return render(request, state)
 
-        try:
-            state.provisioner.submit(node, server_url)
-        except (QueueFull, NotAccepting) as exc:
-            state.flashes.add("error", f"{exc}; the node will be picked up shortly")
-        else:
-            label = "control plane node" if role == meta.ROLE_SERVER else "node"
-            state.flashes.add("info", f"deploying {label} {node.short_name}")
-        return grid(request, state)
+        label = "control plane node" if role == meta.ROLE_SERVER else "node"
+        state.flashes.add("info", f"deploying {label} {node.short_name}")
+        return render(request, state)
 
     @app.post("/nodes/{name}/kill", response_class=HTMLResponse)
     def kill(request: Request, name: str, state: AppState = Depends(get_state)):
@@ -296,49 +247,53 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
             node = state.manager.get(name)
         except NodeNotFound:
             return PlainTextResponse(f"no node named {name}", status_code=404)
-        state.provisioner.cancel(node.uuid)
         try:
-            state.manager.delete_by_name(name)
+            state.manager.delete(node.uuid)
         except NodeNotFound:
             return PlainTextResponse(f"no node named {name}", status_code=404)
-        except libvirt.libvirtError as exc:
+        except (libvirt.libvirtError, poolmod.PoolError) as exc:
             log.exception("killing %s failed", name)
             state.flashes.add("error", f"could not fully remove {node.short_name}: {exc}")
         else:
             state.flashes.add("info", f"killed {node.short_name}")
-        return grid(request, state)
+        return render(request, state)
 
     @app.post("/reset", response_class=HTMLResponse)
     def reset(request: Request, state: AppState = Depends(get_state)) -> HTMLResponse:
-        for node in state.snapshot():
-            state.provisioner.cancel(node.uuid)
         try:
             removed = state.manager.reset()
-        except libvirt.libvirtError as exc:
+        except (libvirt.libvirtError, poolmod.PoolError) as exc:
             log.exception("reset failed")
             state.flashes.add("error", f"reset did not complete: {exc}")
         else:
             state.flashes.add("info", f"removed {removed} node(s)")
-        return grid(request, state)
+        return render(request, state)
 
     @app.post("/prune-nodes", response_class=HTMLResponse)
     def prune(request: Request, state: AppState = Depends(get_state)) -> HTMLResponse:
+        # Pruning touches Kubernetes objects, not libvirt, so this listing is
+        # still accurate afterwards and is reused for the response.
         nodes = state.snapshot()
         try:
-            server = cluster.pick_server(nodes)
-            agent = state.provisioner.agent_for(server.uuid)
-            result = cluster.prune_nodes(state.cfg, nodes, agent)
+            result = cluster.prune_nodes(
+                state.cfg,
+                nodes,
+                lambda uuid: guestexec.QemuAgent(
+                    state.cm, uuid, timeout_s=state.cfg.observation.qga_timeout_s
+                ),
+                manager=state.manager,
+            )
         except (cluster.NoServerAvailable, guestexec.AgentUnavailable, guestexec.AgentError) as exc:
             state.flashes.add("error", str(exc))
-            return grid(request, state)
+            return render(request, state, nodes=nodes)
         except guestexec.ExecTimeout as exc:
             state.flashes.add("error", f"kubectl did not answer in time: {exc}")
-            return grid(request, state)
+            return render(request, state, nodes=nodes)
 
         state.flashes.add("info" if not result.failed else "error", result.summary())
         for name, reason in result.failed:
             state.flashes.add("error", f"{name}: {reason}")
-        return grid(request, state)
+        return render(request, state, nodes=nodes)
 
     @app.get("/healthz")
     def healthz(state: AppState = Depends(get_state)) -> JSONResponse:
@@ -346,28 +301,24 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
             "uri": state.cfg.libvirt.uri,
             "connection_epoch": state.cm.epoch,
             "singleton_lock": state.singleton is not None,
-            "in_flight": state.provisioner.in_flight,
-            "queue_load": state.provisioner.pool.load,
+            "observation_stale_after_s": state.cfg.observation.stale_after_s,
         }
         try:
-            nodes = state.manager.list_nodes()
-            payload["nodes"] = len(nodes)
-            payload["states"] = sorted({node.state for node in nodes})
+            # Metadata only: the counts here do not need power state or an
+            # address for every node.
+            states = state.manager.states()
+            payload["nodes"] = len(states)
+            payload["states"] = sorted(set(states))
         except libvirt.libvirtError as exc:
             payload["error"] = str(exc)
             return JSONResponse(payload, status_code=503)
 
         try:
-            status = state.cm.read(
-                lambda conn: poolmod.inspect(
-                    conn.storagePoolLookupByName(state.cfg.libvirt.pool),
-                    state.cfg.vm.name_prefix,
-                )
-            )
+            status = state.manager.pool_status()
             payload["pool_marker"] = status.marker
             payload["unclassified_volumes"] = list(status.unknown)
-            payload["orphan_candidates"] = sorted(state.manager.unclaimed_volumes())
-        except libvirt.libvirtError as exc:
+            payload["orphan_candidates"] = sorted(state.manager.unclaimed_volumes(status))
+        except (libvirt.libvirtError, poolmod.PoolError) as exc:
             payload["pool_error"] = str(exc)
         return JSONResponse(payload)
 

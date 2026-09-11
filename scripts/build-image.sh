@@ -4,11 +4,10 @@
 #
 # Run this once, off-site, on a machine with a working network — not at the
 # booth. The result is a qcow2 with k3s and qemu-guest-agent already installed
-# and nothing enabled, so provisioning a node at the booth needs no internet at
-# all.
+# and the repo-owned guest service enabled. Provisioning needs no internet.
 #
-# This is a known-good recipe, not a contract. Any image satisfying the
-# requirements in the Readme will do, and the app never checks the k3s version.
+# The image must implement the guest provisioning protocol in the Readme.
+# This recipe installs the repo-owned script and units that implement it.
 #
 # Requires: curl, qemu-img, and virt-customize (libguestfs-tools /
 # guestfs-tools). virt-customize needs no root if libguestfs can use its
@@ -18,13 +17,30 @@ set -euo pipefail
 
 MIRROR="${MIRROR:-https://download.opensuse.org/tumbleweed/appliances}"
 SOURCE_IMAGE="${SOURCE_IMAGE:-openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2}"
-OUTPUT="${OUTPUT:-/var/lib/libvirt/images/k3s-base.qcow2}"
+OUTPUT="${OUTPUT:-/var/lib/libvirt/images/k3s-base-v2.qcow2}"
 DISK_SIZE="${DISK_SIZE:-20G}"
 K3S_REPO="${K3S_REPO:-https://download.opensuse.org/repositories/devel:/kubic/openSUSE_Tumbleweed/devel:kubic.repo}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
+REPO_ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
+
+if [[ -e "$OUTPUT" || -L "$OUTPUT" ]]; then
+  printf 'Refusing to overwrite existing output: %s\n' "$OUTPUT" >&2
+  exit 1
+fi
+output_dir="$(dirname -- "$OUTPUT")"
+if [[ ! -d "$output_dir" || ! -w "$output_dir" || ! -x "$output_dir" ]]; then
+  printf 'Output directory must exist and be writable: %s\n' "$output_dir" >&2
+  exit 1
+fi
 
 workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
+staged=
+cleanup() {
+  if [[ -n "$staged" ]]; then rm -f -- "$staged"; fi
+  rm -rf -- "$workdir"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 echo "==> downloading $SOURCE_IMAGE"
 # The Cloud flavour is the one that ships qemu-guest-agent AND cloud-init; the
@@ -38,22 +54,32 @@ customise=(
   virt-customize -a "$workdir/base.qcow2"
   --run-command "zypper --non-interactive addrepo --refresh '$K3S_REPO' || true"
   --run-command "zypper --non-interactive --gpg-auto-import-keys refresh"
-  --install k3s,qemu-guest-agent,util-linux
+  --install "k3s,qemu-guest-agent,util-linux"
 
-  # The guest agent is the only channel the dashboard has into the guest.
+  # The guest agent reports status; the seed and guest units own provisioning.
   --run-command "systemctl enable qemu-guest-agent.service"
 
-  # firstboot writes and enables its own unit; the packaged ones must not race
-  # it, and their presence is a hard error in the preflight.
+  # Packaged units must never race the repo-owned service.
   --run-command "systemctl disable k3s.service k3s-server.service k3s-agent.service 2>/dev/null || true"
+  --run-command "systemctl mask k3s.service k3s-server.service k3s-agent.service"
+  --mkdir /usr/local/libexec
+  --upload "$REPO_ROOT/firstboot/k3s-demo-guest:/usr/local/libexec/k3s-demo-guest"
+  --chmod 0755:/usr/local/libexec/k3s-demo-guest
+  --upload "$REPO_ROOT/firstboot/k3s-demo-prepare.service:/etc/systemd/system/k3s-demo-prepare.service"
+  --upload "$REPO_ROOT/firstboot/k3s-node.service:/etc/systemd/system/k3s-node.service"
+  --chmod 0644:/etc/systemd/system/k3s-demo-prepare.service
+  --chmod 0644:/etc/systemd/system/k3s-node.service
+  --run-command "systemctl enable k3s-node.service"
 
   # cloud-init has no datasource here and only wastes boot time.
-  --run-command "touch /etc/cloud/cloud-init.disabled"
+  --run-command "mkdir -p /etc/cloud; touch /etc/cloud/cloud-init.disabled"
 
-  # A clean slate: no cluster data, and no machine-id, so every clone gets its
-  # own and therefore its own DHCP lease.
+  # A clean slate: no cluster data or shared machine identity.
   --run-command "rm -rf /var/lib/rancher/k3s /etc/rancher/k3s/config.yaml /var/lib/k3s-kvm-demo"
-  --run-command "rm -f /etc/machine-id /var/lib/systemd/random-seed"
+  # Unlink the D-Bus alias as well as regular stale IDs, without following it.
+  # An empty file lets PID 1 generate an ID without ConditionFirstBoot=yes,
+  # avoiding first-boot setup and presets that could change our enabled units.
+  --run-command "rm -f /var/lib/dbus/machine-id /etc/machine-id /var/lib/systemd/random-seed && install -m 0644 /dev/null /etc/machine-id"
   --run-command "rm -rf /var/cache/zypp/*"
 )
 
@@ -66,7 +92,11 @@ echo "==> customising"
 "${customise[@]}"
 
 echo "==> writing $OUTPUT"
-install -D -m 0644 "$workdir/base.qcow2" "$OUTPUT"
+staged="$(mktemp "$output_dir/.k3s-demo-image.XXXXXX")"
+install -m 0644 -- "$workdir/base.qcow2" "$staged"
+# Same-filesystem hard linking publishes the complete image atomically. -T also
+# refuses a directory or symlink at OUTPUT, including one created after preflight.
+ln -T -- "$staged" "$OUTPUT"
 
 cat <<EOF
 
@@ -74,7 +104,7 @@ Done: $OUTPUT
 
 Check it before the event:
   qemu-img info $OUTPUT
-  virt-cat -a $OUTPUT /etc/machine-id      # should not exist
+  virt-cat -a $OUTPUT /etc/machine-id      # should be empty
   virt-ls  -a $OUTPUT /var/lib/rancher     # should not exist
 
 Then point vm.base_image at it and run:

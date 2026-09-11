@@ -30,7 +30,7 @@ class InvalidName(ValueError):
 
 def validate_prefix(prefix: str) -> str:
     """Return *prefix* if a node name built from it fits in a DNS-1123 label."""
-    if not DNS_1123_LABEL.match(prefix):
+    if not DNS_1123_LABEL.fullmatch(prefix):
         raise InvalidName(
             f"{prefix!r} is not a DNS-1123 label "
             "(lowercase alphanumerics and '-', not starting or ending with '-')"
@@ -45,12 +45,12 @@ def validate_prefix(prefix: str) -> str:
 
 def name_pattern(prefix: str) -> re.Pattern[str]:
     """Match exactly the node names this deployment may own."""
-    return re.compile(rf"^{re.escape(prefix)}-[0-9a-f]{{32}}$")
+    return re.compile(rf"{re.escape(prefix)}-[0-9a-f]{{32}}\Z")
 
 
 def volume_pattern(prefix: str) -> re.Pattern[str]:
-    """Match exactly the overlay volume names this deployment may own."""
-    return re.compile(rf"^{re.escape(prefix)}-[0-9a-f]{{32}}\{VOLUME_SUFFIX}$")
+    """Match exactly the overlay and seed volume names this deployment may own."""
+    return re.compile(rf"{re.escape(prefix)}-[0-9a-f]{{32}}\.(?:qcow2|iso)\Z")
 
 
 def node_name(prefix: str, uuid_hex: str) -> str:
@@ -59,6 +59,10 @@ def node_name(prefix: str, uuid_hex: str) -> str:
 
 def volume_name(name: str) -> str:
     return f"{name}{VOLUME_SUFFIX}"
+
+
+def seed_volume_name(name: str) -> str:
+    return f"{name}.iso"
 
 
 def allocate(prefix: str, taken: Container[str]) -> tuple[str, str]:

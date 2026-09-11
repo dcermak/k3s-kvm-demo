@@ -12,7 +12,7 @@ import json
 import shutil
 import subprocess
 import tomllib
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import names
@@ -28,14 +28,15 @@ class ConfigError(Exception):
         self.key = key
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ServerConfig:
     bind: str = "127.0.0.1"
     port: int = 8000
     allowed_hosts: tuple[str, ...] = ("127.0.0.1:8000", "localhost:8000")
+    lock_path: Path = Path("/run/k3s-kvm-demo/dashboard.lock")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LibvirtConfig:
     uri: str = "qemu:///system"
     pool: str = "k3s-demo"
@@ -46,7 +47,7 @@ class LibvirtConfig:
         return self.uri.startswith("test:")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class VMConfig:
     base_image: Path
     disk_gb: int = 20
@@ -60,55 +61,33 @@ class VMConfig:
         return self.disk_gb * GIB
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ClusterConfig:
     token: str
     tls_san: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class FirstbootConfig:
-    script: Path
-    boot_timeout_s: int = 180
-    exec_timeout_s: int = 300
-    qga_timeout_s: int = 10
-    retry_backoff_s: tuple[int, ...] = (2, 5, 10, 30)
-    log_tail_bytes: int = 8192
+@dataclass(frozen=True)
+class ObservationConfig:
+    interval_s: int = 2
+    qga_timeout_s: int = 2
+    stale_after_s: int = 30
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class MaintenanceConfig:
-    reap_orphans: bool = False
-    orphan_min_age_s: int = 600
     shutdown_grace_s: int = 30
-    service_probe_attempts: int = 20
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig
     libvirt: LibvirtConfig
     vm: VMConfig
     cluster: ClusterConfig
-    firstboot: FirstbootConfig
+    observation: ObservationConfig
     maintenance: MaintenanceConfig
     source: Path | None = field(default=None, compare=False)
-
-
-def _defaults(cls: type) -> dict:
-    """Field defaults by name.
-
-    ``slots=True`` replaces the class attributes with slot descriptors, so
-    ``VMConfig.disk_gb`` is not the default — the field metadata is.
-    """
-    return {f.name: f.default for f in fields(cls) if f.default is not MISSING}
-
-
-D_SERVER = _defaults(ServerConfig)
-D_LIBVIRT = _defaults(LibvirtConfig)
-D_VM = _defaults(VMConfig)
-D_FIRSTBOOT = _defaults(FirstbootConfig)
-D_MAINTENANCE = _defaults(MaintenanceConfig)
 
 
 def _section(raw: dict, name: str) -> dict:
@@ -164,25 +143,31 @@ def load(path: str | Path) -> Config:
 
 
 def from_mapping(raw: dict, *, source: Path | None = None) -> Config:
+    if "firstboot" in raw:
+        raise ConfigError(
+            "firstboot",
+            "host provisioning was removed; rebuild the guest image and "
+            "replace [firstboot] with [observation]",
+        )
     server = _load_server(_section(raw, "server"))
     libvirt_cfg = _load_libvirt(_section(raw, "libvirt"))
     vm = _load_vm(_section(raw, "vm"))
     cluster = _load_cluster(_section(raw, "cluster"))
-    firstboot = _load_firstboot(_section(raw, "firstboot"), source)
+    observation = _load_observation(_section(raw, "observation"))
     maintenance = _load_maintenance(_section(raw, "maintenance"))
     return Config(
         server=server,
         libvirt=libvirt_cfg,
         vm=vm,
         cluster=cluster,
-        firstboot=firstboot,
+        observation=observation,
         maintenance=maintenance,
         source=source,
     )
 
 
 def _load_server(section: dict) -> ServerConfig:
-    bind = section.get("bind", D_SERVER["bind"])
+    bind = section.get("bind", ServerConfig.bind)
     if not isinstance(bind, str):
         raise ConfigError("server.bind", "must be a string")
     if not _is_loopback(bind):
@@ -192,21 +177,31 @@ def _load_server(section: dict) -> ServerConfig:
             "runs root commands inside guests over an unauthenticated API; it must "
             "not listen off-host.",
         )
-    port = _positive_int(section, "server", "port", D_SERVER["port"])
+    port = _positive_int(section, "server", "port", ServerConfig.port)
     if port > 65535:
         raise ConfigError("server.port", f"must be <= 65535, got {port}")
-    hosts = _str_tuple(section, "server", "allowed_hosts", D_SERVER["allowed_hosts"])
+    hosts = _str_tuple(
+        section,
+        "server",
+        "allowed_hosts",
+        (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"),
+    )
     if not hosts:
         raise ConfigError("server.allowed_hosts", "must list at least one host")
-    return ServerConfig(bind=bind, port=port, allowed_hosts=hosts)
+    lock_path = section.get("lock_path", str(ServerConfig.lock_path))
+    if not isinstance(lock_path, str) or not Path(lock_path).is_absolute():
+        raise ConfigError(
+            "server.lock_path", "must be an absolute path shared by all launch methods"
+        )
+    return ServerConfig(bind=bind, port=port, allowed_hosts=hosts, lock_path=Path(lock_path))
 
 
 def _load_libvirt(section: dict) -> LibvirtConfig:
     values = {}
     for key, default in (
-        ("uri", D_LIBVIRT["uri"]),
-        ("pool", D_LIBVIRT["pool"]),
-        ("network", D_LIBVIRT["network"]),
+        ("uri", LibvirtConfig.uri),
+        ("pool", LibvirtConfig.pool),
+        ("network", LibvirtConfig.network),
     ):
         value = section.get(key, default)
         if not isinstance(value, str) or not value:
@@ -216,11 +211,11 @@ def _load_libvirt(section: dict) -> LibvirtConfig:
 
 
 def _load_vm(section: dict) -> VMConfig:
-    base_image = Path(_required(section, "vm", "base_image")).expanduser()
+    base_image = Path(_required(section, "vm", "base_image")).expanduser().resolve()
     if not base_image.is_file():
         raise ConfigError("vm.base_image", f"{base_image} does not exist or is not a file")
 
-    prefix = section.get("name_prefix", D_VM["name_prefix"])
+    prefix = section.get("name_prefix", VMConfig.name_prefix)
     if not isinstance(prefix, str):
         raise ConfigError("vm.name_prefix", "must be a string")
     try:
@@ -228,12 +223,14 @@ def _load_vm(section: dict) -> VMConfig:
     except names.InvalidName as exc:
         raise ConfigError("vm.name_prefix", str(exc)) from exc
 
-    disk_gb = _positive_int(section, "vm", "disk_gb", D_VM["disk_gb"])
-    memory_mb = _positive_int(section, "vm", "memory_mb", D_VM["memory_mb"], minimum=512)
-    vcpus = _positive_int(section, "vm", "vcpus", D_VM["vcpus"])
-    max_nodes = _positive_int(section, "vm", "max_nodes", D_VM["max_nodes"])
+    disk_gb = _positive_int(section, "vm", "disk_gb", VMConfig.disk_gb)
+    memory_mb = _positive_int(section, "vm", "memory_mb", VMConfig.memory_mb, minimum=512)
+    vcpus = _positive_int(section, "vm", "vcpus", VMConfig.vcpus)
+    max_nodes = _positive_int(section, "vm", "max_nodes", VMConfig.max_nodes)
 
     info = _qemu_img_info(base_image)
+    if info.get("backing_file"):
+        raise ConfigError("vm.base_image", "must be a standalone qcow2 without a backing file")
     if info["format"] != "qcow2":
         raise ConfigError(
             "vm.base_image", f"must be a qcow2 image, qemu-img reports {info['format']!r}"
@@ -274,7 +271,11 @@ def _qemu_img_info(image: Path) -> dict:
     except subprocess.TimeoutExpired as exc:
         raise ConfigError("vm.base_image", "qemu-img timed out inspecting it") from exc
     data = json.loads(out)
-    return {"format": data.get("format"), "virtual_size": int(data.get("virtual-size", 0))}
+    return {
+        "format": data.get("format"),
+        "virtual_size": int(data.get("virtual-size", 0)),
+        "backing_file": data.get("backing-filename"),
+    }
 
 
 def _load_cluster(section: dict) -> ClusterConfig:
@@ -288,39 +289,23 @@ def _load_cluster(section: dict) -> ClusterConfig:
     return ClusterConfig(token=token, tls_san=tls_san)
 
 
-def _load_firstboot(section: dict, source: Path | None) -> FirstbootConfig:
-    script = Path(_required(section, "firstboot", "script")).expanduser()
-    if not script.is_absolute() and source is not None:
-        script = (source.parent / script).resolve()
-    if not script.is_file():
-        raise ConfigError("firstboot.script", f"{script} does not exist or is not a file")
-
-    def timeout(key: str) -> int:
-        return _positive_int(section, "firstboot", key, D_FIRSTBOOT[key])
-
-    boot_timeout_s = timeout("boot_timeout_s")
-    exec_timeout_s = timeout("exec_timeout_s")
-    qga_timeout_s = timeout("qga_timeout_s")
-    log_tail_bytes = timeout("log_tail_bytes")
-
-    backoff = section.get("retry_backoff_s", list(D_FIRSTBOOT["retry_backoff_s"]))
-    if not isinstance(backoff, (list, tuple)) or not backoff:
-        raise ConfigError("firstboot.retry_backoff_s", "must be a non-empty list of integers")
-    for entry in backoff:
-        if not isinstance(entry, int) or isinstance(entry, bool) or entry < 1:
-            raise ConfigError(
-                "firstboot.retry_backoff_s",
-                f"entries must be positive integers, got {entry!r}",
-            )
-
-    return FirstbootConfig(
-        script=script,
-        boot_timeout_s=boot_timeout_s,
-        exec_timeout_s=exec_timeout_s,
-        qga_timeout_s=qga_timeout_s,
-        retry_backoff_s=tuple(backoff),
-        log_tail_bytes=log_tail_bytes,
+def _load_observation(section: dict) -> ObservationConfig:
+    observation = ObservationConfig(
+        **{
+            key: _positive_int(section, "observation", key, getattr(ObservationConfig, key))
+            for key in ("interval_s", "qga_timeout_s", "stale_after_s")
+        }
     )
+    if observation.stale_after_s <= observation.interval_s:
+        raise ConfigError(
+            "observation.stale_after_s",
+            "must exceed interval_s so completed probes can be observed",
+        )
+    if observation.qga_timeout_s > 2:
+        raise ConfigError(
+            "observation.qga_timeout_s", "must be 1 or 2 seconds to bound observation passes"
+        )
+    return observation
 
 
 def validate_hypervisor(conn, cfg: Config) -> list[str]:
@@ -330,12 +315,15 @@ def validate_hypervisor(conn, cfg: Config) -> list[str]:
     back as warnings.  Skipped entirely for the test driver, which has neither
     a real pool directory nor KVM.
     """
-    import os
     import xml.etree.ElementTree as ET
 
     import libvirt
 
-    from . import domxml, pool as poolmod
+    from . import domxml, meta, pool as poolmod
+
+    meta.check_compatible(conn)
+    if shutil.which("xorriso") is None:
+        raise ConfigError("vm", "xorriso is required to generate configuration disks")
 
     if cfg.libvirt.is_test_driver:
         return []
@@ -360,7 +348,7 @@ def validate_hypervisor(conn, cfg: Config) -> list[str]:
     except poolmod.PoolError as exc:
         raise ConfigError("libvirt.pool", str(exc)) from exc
 
-    target = domxml.pool_target_path(storage)
+    target = domxml.pool_target_path(storage).resolve()
     if target in cfg.vm.base_image.resolve().parents:
         raise ConfigError(
             "vm.base_image",
@@ -384,8 +372,6 @@ def validate_hypervisor(conn, cfg: Config) -> list[str]:
             "KVM is unavailable; guests would run under TCG emulation and be far too "
             "slow for a live demo"
         )
-    elif not os.access("/dev/kvm", os.R_OK | os.W_OK):
-        warnings.append("/dev/kvm is not readable and writable by this user")
 
     _, _, available = storage.info()[1:4]
     headroom = cfg.vm.max_nodes * 4 * GIB
@@ -399,27 +385,14 @@ def validate_hypervisor(conn, cfg: Config) -> list[str]:
 
 
 def _load_maintenance(section: dict) -> MaintenanceConfig:
-    reap = section.get("reap_orphans", D_MAINTENANCE["reap_orphans"])
-    if not isinstance(reap, bool):
-        raise ConfigError("maintenance.reap_orphans", "must be a boolean")
+    reap = section.get("reap_orphans", False)
+    if reap is not False:
+        raise ConfigError(
+            "maintenance.reap_orphans",
+            "automatic orphan deletion was removed; inspect candidates manually",
+        )
     return MaintenanceConfig(
-        reap_orphans=reap,
-        # Zero is meaningful here: it drops the age requirement, leaving the
-        # two-pass rule as the only guard.
-        orphan_min_age_s=_positive_int(
-            section,
-            "maintenance",
-            "orphan_min_age_s",
-            D_MAINTENANCE["orphan_min_age_s"],
-            minimum=0,
-        ),
         shutdown_grace_s=_positive_int(
-            section, "maintenance", "shutdown_grace_s", D_MAINTENANCE["shutdown_grace_s"]
-        ),
-        service_probe_attempts=_positive_int(
-            section,
-            "maintenance",
-            "service_probe_attempts",
-            D_MAINTENANCE["service_probe_attempts"],
+            section, "maintenance", "shutdown_grace_s", MaintenanceConfig.shutdown_grace_s
         ),
     )

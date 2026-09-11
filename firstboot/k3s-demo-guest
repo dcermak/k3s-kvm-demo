@@ -1,0 +1,176 @@
+#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C
+
+# Only the test harness redirects paths. Installed units never set this variable.
+root=${K3S_DEMO_TEST_ROOT:-}
+case "$root" in
+    '') PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH ;;
+    /|*[!\ -~]*|[!/]*) exit 2 ;;
+esac
+state="$root/var/lib/k3s-kvm-demo"
+config="$root/etc/rancher/k3s/config.yaml"
+seed="$root/run/k3s-demo-seed"
+mounted=0
+
+atomic_copy() {
+    cp "$1" "$2.tmp"
+    chmod 0600 "$2.tmp"
+    mv -f "$2.tmp" "$2"
+}
+
+marker() {
+    printf '1\n' > "$1.tmp"
+    chmod 0600 "$1.tmp"
+    mv -f "$1.tmp" "$1"
+}
+
+valid_uuid() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+metadata() {
+    for field in schema node_uuid hostname role; do
+        [ -f "$1/$field" ] && [ ! -L "$1/$field" ] || return 1
+        [ "$(wc -c < "$1/$field")" -le 64 ] || return 1
+        [ "$(wc -l < "$1/$field")" -eq 1 ] || return 1
+    done
+    [ "$(cat "$1/schema")" = 1 ] || return 1
+    node_uuid=$(cat "$1/node_uuid")
+    valid_uuid "$node_uuid" || return 1
+    hostname=$(cat "$1/hostname")
+    [ "${#hostname}" -le 63 ] || return 1
+    printf '%s\n' "$hostname" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' || return 1
+    role=$(cat "$1/role")
+    case "$role" in server|agent) ;; *) return 1 ;; esac
+}
+
+valid_config() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ] || return 1
+    [ "$(wc -c < "$1")" -le 131072 ]
+}
+
+installed() {
+    metadata "$state" || return 1
+    valid_config "$config" || return 1
+    for file in "$config" "$state/schema" "$state/node_uuid" "$state/hostname" "$state/role"; do
+        [ "$(stat -c %a "$file")" = 600 ] || return 1
+        [ -n "$root" ] || [ "$(stat -c %u "$file")" = 0 ] || return 1
+    done
+    [ -f "$root/etc/hostname" ] || return 1
+    [ "$(cat "$root/etc/hostname")" = "$hostname" ]
+}
+
+has_marker() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(wc -c < "$1")" -eq 2 ] &&
+        [ "$(cat "$1")" = 1 ]
+}
+
+prepared() {
+    has_marker "$state/prepared" && installed
+}
+
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [ "$mounted" -eq 1 ]; then umount "$seed" >/dev/null 2>&1 || true; fi
+    if [ "$result" -ne 0 ]; then
+        printf 'prepare-failed\n' >&2
+    fi
+    exit "$result"
+}
+
+active_state() {
+    value=$(systemctl show --property=ActiveState --value "$1" 2>/dev/null) || value=unknown
+    case "$value" in
+        active|reloading|inactive|failed|activating|deactivating|maintenance|refreshing) ;;
+        *) value=unknown ;;
+    esac
+    printf '%s' "$value"
+}
+
+case "${1:-}" in
+    prepare)
+        trap cleanup EXIT
+        trap 'exit 1' HUP INT TERM
+        mkdir -p "$state"
+        chmod 0700 "$state"
+        exec 9>"$state/prepare.lock"
+        flock -n 9 || exit 75
+        if [ -e "$state/prepared" ]; then
+            installed && has_marker "$state/prepared"
+            exit $?
+        fi
+        # No process may have run k3s before this transaction was committed.
+        [ ! -e "$root/var/lib/rancher/k3s" ] || exit 1
+        [ ! -e "$state/started" ] || exit 1
+        command -v k3s >/dev/null 2>&1 || exit 1
+        for unit in k3s.service k3s-server.service k3s-agent.service; do
+            if systemctl is-enabled --quiet "$unit" 2>/dev/null ||
+                systemctl is-active --quiet "$unit" 2>/dev/null; then exit 1; fi
+        done
+        if [ -z "$root" ]; then
+            mkdir -p "$seed"
+            attempt=0
+            until mount -t iso9660 -o ro -L K3SDEMO "$seed" 2>/dev/null; do
+                attempt=$((attempt + 1))
+                [ "$attempt" -lt 30 ] || exit 1
+                sleep 1
+            done
+            mounted=1
+        fi
+        metadata "$seed" || exit 1
+        valid_config "$seed/config.yaml" || exit 1
+        mkdir -p "$root/etc/rancher/k3s"
+        chmod 0700 "$root/etc/rancher/k3s"
+        atomic_copy "$seed/config.yaml" "$config"
+        for field in schema node_uuid hostname role; do
+            atomic_copy "$seed/$field" "$state/$field"
+        done
+        atomic_copy "$seed/hostname" "$root/etc/hostname"
+        hostnamectl set-hostname "$hostname" >/dev/null 2>&1
+        installed || exit 1
+        # Commit only after all prerequisite files and directory entries are durable.
+        sync
+        marker "$state/prepared"
+        sync
+        ;;
+    run)
+        prepared || { printf 'prepare-failed\n' >&2; exit 1; }
+        # Do not pass the private-file umask to K3s and containerd.
+        umask 022
+        exec k3s "$role" --config "$config"
+        ;;
+    mark-started)
+        prepared || { printf 'prepare-failed\n' >&2; exit 1; }
+        if ! has_marker "$state/started"; then
+            marker "$state/started"
+            sync
+        fi
+        ;;
+    status)
+        node_uuid=
+        if [ -f "$state/node_uuid" ] && [ "$(wc -c < "$state/node_uuid")" -le 37 ]; then
+            candidate=$(cat "$state/node_uuid")
+            if valid_uuid "$candidate"; then node_uuid=$candidate; fi
+        fi
+        prepared_value=0
+        if (prepared) >/dev/null 2>&1; then prepared_value=1; fi
+        started_value=0
+        if has_marker "$state/started"; then started_value=1; fi
+        prepare_state=$(active_state k3s-demo-prepare.service)
+        k3s_state=$(active_state k3s-node.service)
+        error_code=none
+        if [ "$prepare_state" = failed ] ||
+            { [ -e "$state/prepared" ] && [ "$prepared_value" -eq 0 ]; } ||
+            { [ "$started_value" -eq 1 ] && [ "$prepared_value" -eq 0 ]; }; then
+            error_code=prepare-failed
+        elif [ "$k3s_state" = failed ]; then
+            error_code=k3s-failed
+        fi
+        printf 'protocol=1\nnode_uuid=%s\nprepared=%s\nstarted=%s\nprepare_state=%s\nk3s_state=%s\nerror_code=%s\n' \
+            "$node_uuid" "$prepared_value" "$started_value" "$prepare_state" "$k3s_state" "$error_code"
+        ;;
+    *) printf 'usage: k3s-demo-guest prepare|run|mark-started|status\n' >&2; exit 2 ;;
+esac

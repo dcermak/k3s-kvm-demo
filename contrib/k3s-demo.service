@@ -14,16 +14,19 @@ User=k3sdemo
 Group=k3sdemo
 SupplementaryGroups=libvirt
 WorkingDirectory=/opt/k3s-kvm-demo
+# Keep vm.base_image absolute; relative image paths resolve from WorkingDirectory,
+# not from the configuration directory below.
 Environment=K3S_DEMO_CONFIG=/etc/k3s-kvm-demo/config.toml
-ExecStart=/usr/bin/uv run --frozen k3s-demo serve
+# Install dependencies in this virtual environment before starting the service.
+ExecStart=/opt/k3s-kvm-demo/.venv/bin/k3s-demo serve
 Restart=always
 RestartSec=5s
 
 # The app holds a whole-process singleton lock, so a second instance would
-# fail to start rather than corrupt anything. Give it a stable runtime dir for
-# that lock.
+# fail to start rather than corrupt anything. Match server.lock_path in config:
+# /run/k3s-kvm-demo/dashboard.lock. This must be absolute and shared by manual
+# launches. RuntimeDirectory supplies the parent; no lock environment is needed.
 RuntimeDirectory=k3s-kvm-demo
-Environment=XDG_RUNTIME_DIR=/run/k3s-kvm-demo
 
 # It only ever talks to libvirt over a local socket and serves loopback.
 PrivateTmp=yes

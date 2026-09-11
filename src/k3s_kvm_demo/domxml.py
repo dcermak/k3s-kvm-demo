@@ -88,6 +88,15 @@ def build_volume_xml(cfg: Config, *, volume: str) -> str:
     return ET.tostring(root, encoding="unicode")
 
 
+def build_seed_volume_xml(*, volume: str, capacity: int) -> str:
+    root = ET.Element("volume", {"type": "file"})
+    ET.SubElement(root, "name").text = volume
+    ET.SubElement(root, "capacity", {"unit": "bytes"}).text = str(capacity)
+    target = ET.SubElement(root, "target")
+    ET.SubElement(target, "format", {"type": "raw"})
+    return ET.tostring(root, encoding="unicode")
+
+
 def build_domain_xml(
     cfg: Config,
     *,
@@ -96,6 +105,7 @@ def build_domain_xml(
     node_meta: meta.NodeMeta,
     domain_type: str,
     disk_path: Path,
+    seed_path: Path,
     arch: str | None = None,
 ) -> str:
     arch = arch or ("x86_64" if domain_type == TYPE_TEST else platform.machine())
@@ -135,12 +145,23 @@ def build_domain_xml(
     ET.SubElement(disk, "driver", {"name": "qemu", "type": "qcow2"})
     ET.SubElement(disk, "source", {"file": str(disk_path)})
     ET.SubElement(disk, "target", {"dev": "vda", "bus": "virtio"})
+    # Config validation requires a standalone base image, so the chain ends here.
+    backing = ET.SubElement(disk, "backingStore", {"type": "file", "index": "1"})
+    ET.SubElement(backing, "format", {"type": "qcow2"})
+    ET.SubElement(backing, "source", {"file": str(cfg.vm.base_image)})
+    ET.SubElement(backing, "backingStore")
+
+    seed = ET.SubElement(devices, "disk", {"type": "file", "device": "disk"})
+    ET.SubElement(seed, "driver", {"name": "qemu", "type": "raw"})
+    ET.SubElement(seed, "source", {"file": str(seed_path)})
+    ET.SubElement(seed, "target", {"dev": "vdb", "bus": "virtio"})
+    ET.SubElement(seed, "readonly")
 
     iface = ET.SubElement(devices, "interface", {"type": "network"})
     ET.SubElement(iface, "source", {"network": cfg.libvirt.network})
     ET.SubElement(iface, "model", {"type": "virtio"})
 
-    # The only channel into the guest: firstboot runs over guest-exec.
+    # Used for observation only; provisioning belongs to the guest.
     channel = ET.SubElement(devices, "channel", {"type": "unix"})
     ET.SubElement(channel, "target", {"type": "virtio", "name": GUEST_AGENT_CHANNEL})
 

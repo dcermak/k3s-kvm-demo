@@ -2,8 +2,8 @@
 
 libvirt runs for real through ``test:///default``: it supports the whole
 lifecycle we exercise — volumes with a backing store, define/start/destroy,
-metadata including the LIVE vs CONFIG split, lease addresses and stats.  Only
-the QEMU guest agent is faked, because it cannot exist without a real VM.
+metadata including the LIVE vs CONFIG split, lease addresses and stats.
+The guest agent and seed upload are faked; seed ISO generation is real.
 
 The test driver shares state between connections in a process, which is what
 lets a reconnect keep its domains, but it also means tests must clean up after
@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import subprocess
 import textwrap
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,18 +23,16 @@ import libvirt
 import pytest
 
 from k3s_kvm_demo import config as configmod
-from k3s_kvm_demo import guestexec, meta, pool as poolmod
+from k3s_kvm_demo import guestexec, meta, pool as poolmod, seed
 from k3s_kvm_demo.conn import ConnectionManager
 from k3s_kvm_demo.libvirtctl import NodeManager
-from k3s_kvm_demo.provision import Provisioner
-from k3s_kvm_demo.workers import WorkerPool
+from k3s_kvm_demo.observer import GUEST_PATH, Observer
 
 TEST_URI = "test:///default"
 TEST_POOL = "default-pool"
 BUILTIN_DOMAIN = "test"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIRSTBOOT_TEMPLATE = REPO_ROOT / "firstboot" / "firstboot.sh.j2"
 
 libvirt.registerErrorHandler(lambda _ctx, _err: None, None)
 
@@ -70,6 +69,24 @@ def _wipe(conn: libvirt.virConnect) -> None:
 
 
 @pytest.fixture(autouse=True)
+def explicit_backing_evidence(monkeypatch):
+    """Give only the test driver's built-in disk an explicit raw format."""
+    real = libvirt.virDomain.XMLDesc
+
+    def described(dom, flags=0):
+        xml = real(dom, flags)
+        if dom.connect().getURI() != TEST_URI or dom.name() != BUILTIN_DOMAIN:
+            return xml
+        root = ET.fromstring(xml)
+        for disk in root.findall("./devices/disk"):
+            if disk.find("driver") is None:
+                ET.SubElement(disk, "driver", {"name": "qemu", "type": "raw"})
+        return ET.tostring(root, encoding="unicode")
+
+    monkeypatch.setattr(libvirt.virDomain, "XMLDesc", described)
+
+
+@pytest.fixture(autouse=True)
 def libvirt_clean():
     conn = libvirt.open(TEST_URI)
     _wipe(conn)
@@ -91,6 +108,30 @@ def conn_factory():
     yield factory
     for connection in opened:
         connection.close()
+
+
+@pytest.fixture
+def conn(conn_factory) -> libvirt.virConnect:
+    """A second connection to assert against, independent of the app's own."""
+    return conn_factory()
+
+
+def add_volume(conn: libvirt.virConnect, name: str) -> str:
+    """Put a volume straight into the pool.  Returns its path."""
+    storage = conn.storagePoolLookupByName(TEST_POOL)
+    storage.createXML(
+        f"<volume type='file'><name>{name}</name>"
+        "<capacity unit='bytes'>1048576</capacity>"
+        "<target><format type='qcow2'/></target></volume>",
+        0,
+    )
+    return storage.storageVolLookupByName(name).path()
+
+
+def volumes(conn: libvirt.virConnect, prefix: str | None = None) -> set[str]:
+    """Volume names in the pool, optionally only those starting with *prefix*."""
+    found = {v.name() for v in conn.storagePoolLookupByName(TEST_POOL).listAllVolumes(0)}
+    return {name for name in found if prefix is None or name.startswith(prefix)}
 
 
 @pytest.fixture
@@ -119,19 +160,13 @@ def config_values(base_image: Path) -> dict:
             "max_nodes": 4,
         },
         "cluster": {"token": "test-token", "tls_san": []},
-        "firstboot": {
-            "script": str(FIRSTBOOT_TEMPLATE),
-            "boot_timeout_s": 10,
-            "exec_timeout_s": 30,
+        "observation": {
+            "interval_s": 2,
             "qga_timeout_s": 2,
-            "retry_backoff_s": [1, 2],
-            "log_tail_bytes": 512,
+            "stale_after_s": 30,
         },
         "maintenance": {
-            "reap_orphans": False,
-            "orphan_min_age_s": 0,
             "shutdown_grace_s": 2,
-            "service_probe_attempts": 3,
         },
     }
 
@@ -160,8 +195,22 @@ def cm(cfg: configmod.Config):
 
 
 @pytest.fixture
-def manager(cm: ConnectionManager, cfg: configmod.Config, marked_pool) -> NodeManager:
-    return NodeManager(cm, cfg)
+def seed_upload(monkeypatch):
+    """The test driver has no streams; leave ISO construction untouched."""
+    uploads = []
+
+    def upload(_conn, volume, artifact):
+        uploads.append((volume.name(), artifact.read_bytes()))
+
+    monkeypatch.setattr(seed, "upload_seed", upload)
+    return uploads
+
+
+@pytest.fixture
+def manager(cm: ConnectionManager, cfg: configmod.Config, marked_pool, seed_upload) -> NodeManager:
+    manager = NodeManager(cm, cfg)
+    manager.join_ready = lambda node: True
+    return manager
 
 
 # -- fake guest agent ------------------------------------------------------
@@ -190,6 +239,11 @@ class FakeAgent:
     _pending: dict = field(default_factory=dict)
     _next_pid: int = 1000
     ping_calls: int = 0
+    uuid: str = ""
+
+    def for_node(self, uuid: str, timeout: int):
+        self.uuid = uuid
+        return self
 
     def ping(self) -> None:
         self.ping_calls += 1
@@ -218,12 +272,28 @@ def result(exitcode: int = 0, stdout: str = "", stderr: str = "") -> guestexec.E
     return guestexec.ExecResult(exitcode=exitcode, signal=None, stdout=stdout, stderr=stderr)
 
 
-def is_firstboot(path: str, args: list[str]) -> bool:
-    return path == "/bin/sh" and args[:1] == ["-s"]
+def is_status(path: str, args: list[str]) -> bool:
+    return path == "/usr/bin/timeout" and args[-2:] == [GUEST_PATH, "status"]
 
 
-def is_probe(path: str, args: list[str]) -> bool:
-    return path == "/bin/sh" and args[:1] == ["-c"]
+def report(node_uuid: str, **changes) -> guestexec.ExecResult:
+    fields = {
+        "protocol": "1",
+        "node_uuid": node_uuid,
+        "prepared": "1",
+        "started": "1",
+        "prepare_state": "active",
+        "k3s_state": "active",
+        "error_code": "none",
+    }
+    fields.update(changes)
+    return result(stdout="".join(f"{key}={value}\n" for key, value in fields.items()))
+
+
+def guest_ready(agent: FakeAgent) -> FakeAgent:
+    """Capture the bound UUID when start resolves the pending response."""
+    agent.responses = [(is_status, lambda: report(agent.uuid))]
+    return agent
 
 
 @pytest.fixture
@@ -231,54 +301,26 @@ def agent() -> FakeAgent:
     return FakeAgent()
 
 
+def observe(observer):
+    observer.reconcile()
+    observer.reconcile()
+
+
 @pytest.fixture
-def provisioner(manager: NodeManager, cfg: configmod.Config, agent: FakeAgent):
-    """A provisioner that runs work synchronously and never really sleeps."""
-    pool = ImmediatePool()
-    prov = Provisioner(
-        manager,
-        cfg,
-        pool=pool,
-        agent_factory=lambda uuid, timeout: agent,
-        sleep=lambda _seconds: None,
-        now=_FakeClock(),
-        wait=lambda _event, _timeout: False,
-    )
-    return prov
+def deployed_node(manager, observer, agent):
+    """One control plane node with a current successful observation."""
+    guest_ready(agent)
+    node = manager.create(meta.ROLE_SERVER)
+    observe(observer)
+    return manager.get(node.name)
 
 
-class ImmediatePool(WorkerPool):
-    """Runs submitted work inline, so tests stay deterministic."""
-
-    def __init__(self) -> None:
-        super().__init__(size=1, queue_size=8)
-        self.submitted = 0
-
-    def start(self) -> None:
-        self._accepting = True
-
-    def submit(self, fn) -> None:
-        self.submitted += 1
-        fn()
-
-    def shutdown(self, grace_s: float) -> bool:
-        self.stop_event.set()
-        return True
-
-    @property
-    def load(self) -> int:
-        return 0
-
-
-class _FakeClock:
-    """Monotonic clock that advances a second per read."""
-
-    def __init__(self) -> None:
-        self._now = 0.0
-
-    def __call__(self) -> float:
-        self._now += 1.0
-        return self._now
+@pytest.fixture
+def observer(manager: NodeManager, cfg: configmod.Config, agent: FakeAgent, monkeypatch):
+    observer = Observer(manager, cfg, agent_factory=agent.for_node)
+    monkeypatch.setattr(observer, "start", lambda: None)
+    yield observer
+    observer.shutdown()
 
 
 # -- fault injection -------------------------------------------------------
@@ -335,7 +377,7 @@ class PoolProxy(_Proxy):
         self._faults.check("volume", BEFORE)
         volume = self._target.createXML(xml, flags)
         self._faults.check("volume", AFTER)
-        return volume
+        return VolumeProxy(volume, self._faults)
 
     def storageVolLookupByName(self, name):
         return VolumeProxy(self._target.storageVolLookupByName(name), self._faults)
@@ -351,6 +393,9 @@ class ConnProxy(_Proxy):
     def storagePoolLookupByName(self, name):
         return PoolProxy(self._target.storagePoolLookupByName(name), self._faults)
 
+    def storagePoolLookupByUUIDString(self, uuid):
+        return PoolProxy(self._target.storagePoolLookupByUUIDString(uuid), self._faults)
+
 
 @pytest.fixture
 def faults() -> Faults:
@@ -358,30 +403,28 @@ def faults() -> Faults:
 
 
 @pytest.fixture
-def faulty_manager(cfg, marked_pool, faults) -> NodeManager:
+def faulty_manager(cfg, marked_pool, faults, seed_upload) -> NodeManager:
     connection = ConnectionManager(
         cfg.libvirt.uri, opener=lambda uri: ConnProxy(libvirt.open(uri), faults)
     )
     connection.open()
     manager = NodeManager(connection, cfg)
+    manager.join_ready = lambda node: True
     yield manager
     connection.close()
 
 
 @pytest.fixture
-def app_state(cfg, manager, provisioner):
+def app_state(cfg, manager, observer):
     from k3s_kvm_demo.app import AppState
 
-    state = AppState(
+    return AppState(
         cfg=cfg,
         cm=manager.cm,
         manager=manager,
-        provisioner=provisioner,
+        observer=observer,
         singleton=None,
-        orphans=poolmod.OrphanTracker(min_age_s=cfg.maintenance.orphan_min_age_s),
     )
-    provisioner._maintenance = state.reap_orphans
-    return state
 
 
 @pytest.fixture
@@ -396,10 +439,18 @@ def client(cfg, app_state):
 
 
 def make_meta(**overrides) -> meta.NodeMeta:
+    connection = libvirt.open(TEST_URI)
+    try:
+        pool_uuid = connection.storagePoolLookupByName(TEST_POOL).UUIDString()
+    finally:
+        connection.close()
     values = {
         "role": meta.ROLE_AGENT,
         "bootstrap": False,
         "volume": "k3s-node-" + "0" * 32 + ".qcow2",
+        "seed_volume": "k3s-node-" + "0" * 32 + ".iso",
+        "pool_uuid": pool_uuid,
+        "scope_prefix": "k3s-node",
         "created": meta.now(),
         "generation": 1,
         "state": meta.CREATING,

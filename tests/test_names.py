@@ -54,6 +54,9 @@ def test_patterns_only_match_our_own_names():
 
     volumes = names.volume_pattern("k3s-node")
     assert volumes.match(names.volume_name(good))
+    assert volumes.match(names.seed_volume_name(good))
+    assert not volumes.match(names.volume_name(good) + "\n")
+    assert not pattern.match(good + "\n")
     assert not volumes.match(good)
     assert not volumes.match("k3s-kvm-demo.marker")
 

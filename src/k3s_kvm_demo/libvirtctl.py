@@ -1,27 +1,21 @@
-"""Node lifecycle: discovery, the create saga, idempotent deletion.
-
-Every destructive call re-reads the domain's own metadata immediately before
-acting, and the volume it deletes is always the one that metadata names — never
-one derived from a URL or a domain name.
-
-The domain is defined *before* its volume exists and undefined *after* that
-volume is gone, so the durable ownership record strictly brackets the volume's
-life.  Any create step that fails hands off to the same idempotent delete saga,
-which first observes what the hypervisor actually has: a call may well have
-succeeded server-side and then raised client-side, and tearing down a running
-domain's disk without destroying the domain first would be a disaster.
-"""
+"""Scoped node lifecycle with durable two-volume ownership and launch intent."""
 
 from __future__ import annotations
 
 import enum
 import logging
+import posixpath
+import tempfile
 import threading
-from dataclasses import dataclass, replace
+import xml.etree.ElementTree as ET
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import UUID
 
 import libvirt
 
-from . import domxml, meta, names, pool as poolmod
+from . import domxml, k3sconf, meta, names, pool as poolmod, seed
 from .config import Config
 from .conn import ConnectionManager
 
@@ -63,6 +57,22 @@ SERVICE_UNKNOWN = "unknown"
 
 K3S_API_PORT = 6443
 
+#: One bulk call replaces per-domain ``state()`` and ``info()``.  Verified on
+#: both drivers: ``qemu:///system`` fills ``vcpu.current`` and
+#: ``balloon.maximum`` with exactly what ``info()`` reports, and both drivers
+#: include shut-off domains under these flags.  ``test:///default`` returns
+#: only ``state.*``, which the configured-value fallback in ``_node_from``
+#: already covers.
+DOMAIN_STATS = (
+    libvirt.VIR_DOMAIN_STATS_STATE
+    | libvirt.VIR_DOMAIN_STATS_VCPU
+    | libvirt.VIR_DOMAIN_STATS_BALLOON
+)
+ALL_DOMAINS = (
+    libvirt.VIR_CONNECT_GET_ALL_DOMAINS_STATS_ACTIVE
+    | libvirt.VIR_CONNECT_GET_ALL_DOMAINS_STATS_INACTIVE
+)
+
 
 class DeployRefused(Exception):
     """A deploy cannot proceed right now, for a reason worth showing a human."""
@@ -86,12 +96,13 @@ class Node:
     generation: int
     state: str
     error: str | None
-    known_state: bool
     # observed
     power: str
     ip: str | None
     vcpus: int
     memory_mb: int
+    seed_volume: str = ""
+    pool_uuid: str = ""
     service: str = SERVICE_UNKNOWN
     progress: str | None = None
     log: str | None = None
@@ -104,6 +115,15 @@ class Node:
     def short_name(self) -> str:
         prefix, _, identifier = self.name.rpartition("-")
         return f"{prefix}-{identifier[:8]}" if prefix else self.name
+
+    @property
+    def known_state(self) -> bool:
+        """False for a state written by some future version of this app."""
+        return self.state in meta.STATES
+
+    @property
+    def tone(self) -> str:
+        return meta.tone(self.state)
 
     @property
     def is_server(self) -> bool:
@@ -123,10 +143,7 @@ class Action(enum.Enum):
 
     NONE = "none"
     DELETE = "delete"
-    AWAIT_AGENT = "await-agent"
-    CONFIGURE = "configure"
     VERIFY = "verify"
-    FAIL = "fail"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,61 +152,40 @@ class Decision:
     reason: str | None = None
 
 
-def decide(state: str, power: str, *, known_state: bool = True) -> Decision:
+def decide(state: str, power: str) -> Decision:
     """The complete state x power table.
 
     Deliberately total: an undefined combination is how nodes get stranded.
     """
-    if not known_state:
+    if state not in meta.STATES:
         # Written by a newer version. Show it, leave it alone, allow Kill.
         return Decision(Action.NONE, "unrecognised state")
 
     if state in meta.INCOMPLETE:
         return Decision(Action.DELETE, f"{state} was interrupted")
 
-    running = power == POWER_RUNNING
-
-    if state == meta.BOOTING:
-        if running:
-            return Decision(Action.AWAIT_AGENT)
-        return Decision(Action.FAIL, "stopped before first boot completed")
-
-    if state == meta.CONFIGURING:
-        if running:
-            return Decision(Action.CONFIGURE)
-        return Decision(Action.FAIL, "stopped during configuration")
-
-    if state == meta.CONFIGURED:
-        # A power cycle must never rewrite how provisioning ended; a stopped
-        # node stays 'configured' and simply reads as shut off.
-        return Decision(Action.VERIFY) if running else Decision(Action.NONE)
+    if state in {meta.BOOTING, meta.CONFIGURING, meta.CONFIGURED} and power == POWER_RUNNING:
+        return Decision(Action.VERIFY)
 
     return Decision(Action.NONE)
 
 
-def power_name(dom: libvirt.virDomain) -> str:
-    try:
-        return _POWER_NAMES.get(dom.state()[0], "unknown")
-    except libvirt.libvirtError:
-        return "unknown"
+def power_name(stats: dict) -> str:
+    return _POWER_NAMES.get(stats.get("state.state"), "unknown")
 
 
 def guest_ip(dom: libvirt.virDomain) -> str | None:
-    """Best-effort IPv4 for a running domain: guest agent first, then lease."""
-    for source in (
-        libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_AGENT,
-        libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE,
-    ):
-        try:
-            interfaces = dom.interfaceAddresses(source) or {}
-        except libvirt.libvirtError:
+    """Best-effort IPv4 from DHCP leases; never wait on the guest agent."""
+    try:
+        interfaces = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE) or {}
+    except libvirt.libvirtError:
+        return None
+    for name, entry in interfaces.items():
+        if name == "lo":
             continue
-        for name, entry in interfaces.items():
-            if name == "lo":
-                continue
-            for address in entry.get("addrs") or ():
-                if address.get("type") == libvirt.VIR_IP_ADDR_TYPE_IPV4:
-                    return address.get("addr")
+        for address in entry.get("addrs") or ():
+            if address.get("type") == libvirt.VIR_IP_ADDR_TYPE_IPV4:
+                return address.get("addr")
     return None
 
 
@@ -200,6 +196,7 @@ class NodeManager:
         self.cm = cm
         self.cfg = cfg
         self.lock = threading.RLock()
+        self.join_ready: Callable[[Node], bool] = lambda node: False
         self._domain_type: str | None = None
 
     # -- helpers -----------------------------------------------------------
@@ -217,75 +214,120 @@ class NodeManager:
     def _pool(self, conn: libvirt.virConnect) -> libvirt.virStoragePool:
         return conn.storagePoolLookupByName(self.cfg.libvirt.pool)
 
-    def _node_from(self, dom: libvirt.virDomain, node_meta: meta.NodeMeta) -> Node:
-        power = power_name(dom)
-        vcpus = self.cfg.vm.vcpus
-        memory_mb = self.cfg.vm.memory_mb
-        try:
-            _, max_mem_kib, _, nr_vcpu, _ = dom.info()
-            if nr_vcpu:
-                vcpus = nr_vcpu
-            if max_mem_kib:
-                memory_mb = max_mem_kib // 1024
-        except libvirt.libvirtError:
-            pass
+    def _node_from(self, dom: libvirt.virDomain, node_meta: meta.NodeMeta, stats: dict) -> Node:
+        power = power_name(stats)
+        # A driver that reports no vcpu/balloon figures (the test one does not)
+        # leaves the values we asked for at definition time, which are right.
+        max_mem_kib = stats.get("balloon.maximum")
         return Node(
             name=dom.name(),
             uuid=dom.UUIDString(),
             role=node_meta.role,
             bootstrap=node_meta.bootstrap,
             volume=node_meta.volume,
+            seed_volume=node_meta.seed_volume,
+            pool_uuid=node_meta.pool_uuid,
             created=node_meta.created,
             generation=node_meta.generation,
             state=node_meta.state,
             error=node_meta.error,
-            known_state=node_meta.is_known_state,
             power=power,
             ip=guest_ip(dom) if power == POWER_RUNNING else None,
-            vcpus=vcpus,
-            memory_mb=memory_mb,
+            vcpus=stats.get("vcpu.current") or self.cfg.vm.vcpus,
+            memory_mb=max_mem_kib // 1024 if max_mem_kib else self.cfg.vm.memory_mb,
         )
 
-    def _managed(self, conn: libvirt.virConnect) -> list[tuple[libvirt.virDomain, meta.NodeMeta]]:
+    @staticmethod
+    def _domains(conn: libvirt.virConnect) -> list[tuple[libvirt.virDomain, dict]]:
+        """Every domain on the host, with its stats, in one round-trip."""
+        return conn.getAllDomainStats(DOMAIN_STATS, ALL_DOMAINS)
+
+    def _managed(
+        self,
+        conn: libvirt.virConnect,
+        domains: list[tuple[libvirt.virDomain, dict]] | None = None,
+    ) -> list[tuple[libvirt.virDomain, meta.NodeMeta, dict]]:
+        """The domains carrying our metadata, out of *domains* or the host's."""
         found = []
-        for dom in conn.listAllDomains(0):
+        pool_uuid = self._pool(conn).UUIDString()
+        for dom, stats in self._domains(conn) if domains is None else domains:
             node_meta = meta.try_read(dom)
-            if node_meta is not None:
-                found.append((dom, node_meta))
+            if (
+                node_meta is not None
+                and node_meta.pool_uuid == pool_uuid
+                and node_meta.scope_prefix == self.cfg.vm.name_prefix
+            ):
+                found.append((dom, node_meta, stats))
         return found
+
+    @staticmethod
+    def _lookup(conn: libvirt.virConnect, uuid: str) -> libvirt.virDomain | None:
+        """The domain, or None if it is already gone."""
+        try:
+            return conn.lookupByUUIDString(uuid)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            raise
 
     # -- reads -------------------------------------------------------------
 
+    def check_compatible(self) -> None:
+        with self.lock:
+            self.cm.read(meta.check_compatible)
+
+    def _in_scope(self, conn: libvirt.virConnect, record: meta.NodeMeta) -> bool:
+        return (
+            record.pool_uuid == self._pool(conn).UUIDString()
+            and record.scope_prefix == self.cfg.vm.name_prefix
+        )
+
     def list_nodes(self) -> list[Node]:
         def run(conn: libvirt.virConnect) -> list[Node]:
-            return [self._node_from(dom, m) for dom, m in self._managed(conn)]
+            return [self._node_from(dom, m, stats) for dom, m, stats in self._managed(conn)]
 
         nodes = self.cm.read(run)
         nodes.sort(key=lambda n: (n.created, n.name))
         return nodes
 
-    def get(self, name: str) -> Node:
-        for node in self.list_nodes():
-            if node.name == name:
-                return node
-        raise NodeNotFound(name)
+    def states(self) -> list[str]:
+        """Durable states of every managed node, from metadata alone."""
+        return self.cm.read(lambda conn: [m.state for _, m, _ in self._managed(conn)])
 
-    def read_meta(self, uuid: str) -> meta.NodeMeta | None:
-        def run(conn: libvirt.virConnect) -> meta.NodeMeta | None:
+    def get(self, name: str) -> Node:
+        """One node by name, without sweeping the host.
+
+        The name is checked against the pattern this deployment issues before
+        any lookup, so a name we could not have created never resolves.
+        """
+        if not names.name_pattern(self.cfg.vm.name_prefix).match(name):
+            raise NodeNotFound(name)
+
+        def run(conn: libvirt.virConnect) -> Node:
             try:
-                dom = conn.lookupByUUIDString(uuid)
+                dom = conn.lookupByName(name)
             except libvirt.libvirtError as exc:
                 if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                    return None
+                    raise NodeNotFound(name) from exc
                 raise
-            return meta.try_read(dom)
+            node_meta = meta.try_read(dom)
+            if node_meta is None or not self._in_scope(conn, node_meta):
+                raise NodeNotFound(name)
+            ((_, stats),) = conn.domainListGetStats([dom], DOMAIN_STATS, 0)
+            return self._node_from(dom, node_meta, stats)
 
         return self.cm.read(run)
 
     # -- durable writes ----------------------------------------------------
 
     def update_state(
-        self, uuid: str, generation: int, state: str, *, error: str | None = None
+        self,
+        uuid: str,
+        generation: int,
+        state: str,
+        *,
+        error: str | None = None,
+        expected_states: Collection[str] | None = None,
     ) -> bool:
         """Advance a node's durable state, unless it moved on without us.
 
@@ -296,21 +338,32 @@ class NodeManager:
         """
 
         def run(conn: libvirt.virConnect) -> bool:
-            try:
-                dom = conn.lookupByUUIDString(uuid)
-            except libvirt.libvirtError as exc:
-                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                    return False
-                raise
+            meta.check_compatible(conn)
+            dom = self._lookup(conn, uuid)
+            if dom is None:
+                return False
             current = meta.try_read(dom)
-            if current is None:
+            if current is None or not self._in_scope(conn, current):
                 return False
             if current.generation != generation or current.state == meta.DELETING:
                 return False
+            if expected_states is not None and current.state not in expected_states:
+                return False
+            if state == meta.CREATING and current.state != meta.CREATING:
+                return False
+            if current.state == meta.CONFIGURED and state in {
+                meta.BOOTING,
+                meta.CONFIGURING,
+                meta.FAILED,
+            }:
+                return False
+            if state not in meta.STATES:
+                raise ValueError(f"unknown state {state!r}")
             meta.write(dom, current.advanced(state, error=error))
             return True
 
-        return self.cm.call(run)
+        with self.lock:
+            return self.cm.call(run)
 
     # -- deploy ------------------------------------------------------------
 
@@ -320,28 +373,38 @@ class NodeManager:
             raise DeployRefused(f"unknown role {role!r}")
 
         servers = [n for n in nodes if n.is_server]
-        if role == meta.ROLE_SERVER and not servers:
+        if role == meta.ROLE_SERVER and not nodes:
             return True, None
+        if nodes and not servers:
+            raise DeployRefused(
+                "workers remain without a control plane; reset before bootstrapping"
+            )
 
         usable = [
-            n for n in servers if n.state == meta.CONFIGURED and n.power == POWER_RUNNING and n.ip
+            n
+            for n in servers
+            if n.state == meta.CONFIGURED and n.running and n.ip and self.join_ready(n)
         ]
         if not usable:
             raise DeployRefused(
-                "no control plane node has finished provisioning yet — wait for the "
-                "first one to report 'configured' before adding more nodes"
+                "no control plane node has finished provisioning with fresh readiness evidence; "
+                "wait for a configured, running server to pass its readiness probe"
             )
         oldest = min(usable, key=lambda n: (n.created, n.name))
         return False, oldest.api_url
 
-    def create(self, role: str) -> tuple[Node, str | None]:
-        """Create and start a node.  Returns the node and its join URL."""
+    def create(self, role: str) -> Node:
+        """Create and launch once; all subsequent guest work is observed only."""
         with self.lock:
             return self.cm.call(lambda conn: self._create(conn, role))
 
-    def _create(self, conn: libvirt.virConnect, role: str) -> tuple[Node, str | None]:
+    def _create(self, conn: libvirt.virConnect, role: str) -> Node:
+        meta.check_compatible(conn)
         cfg = self.cfg
-        existing = [self._node_from(dom, m) for dom, m in self._managed(conn)]
+        domains = self._domains(conn)
+        existing = [
+            self._node_from(dom, m, stats) for dom, m, stats in self._managed(conn, domains)
+        ]
         if len(existing) >= cfg.vm.max_nodes:
             raise DeployRefused(f"the node limit of {cfg.vm.max_nodes} is reached; kill one first")
 
@@ -350,15 +413,19 @@ class NodeManager:
         storage = self._pool(conn)
         poolmod.require_owned(storage, cfg.vm.name_prefix)
 
-        taken = {dom.name() for dom in conn.listAllDomains(0)}
+        taken = {dom.name() for dom, _ in domains}
         name, uuid = names.allocate(cfg.vm.name_prefix, taken)
         volume = names.volume_name(name)
+        seed_volume = names.seed_volume_name(name)
         disk_path = domxml.volume_path(storage, volume)
 
         node_meta = meta.NodeMeta(
             role=role,
             bootstrap=bootstrap,
             volume=volume,
+            seed_volume=seed_volume,
+            pool_uuid=storage.UUIDString(),
+            scope_prefix=cfg.vm.name_prefix,
             created=meta.now(),
             generation=1,
             state=meta.CREATING,
@@ -370,110 +437,184 @@ class NodeManager:
             node_meta=node_meta,
             domain_type=self.domain_type(conn),
             disk_path=disk_path,
+            seed_path=domxml.volume_path(storage, seed_volume),
         )
 
-        try:
-            # Define first: ownership must predate the volume it authorises us
-            # to delete. libvirt does not require the disk to exist yet.
-            dom = conn.defineXML(domain_xml)
-            storage.createXML(domxml.build_volume_xml(cfg, volume=volume), 0)
-            dom.create()
-            node_meta = node_meta.advanced(meta.BOOTING)
-            meta.write(dom, node_meta)
-        except Exception:
-            log.exception("creating %s failed; rolling back", name)
+        config_bytes = k3sconf.config_yaml(
+            node_name=name,
+            role=role,
+            token=cfg.cluster.token,
+            is_bootstrap=bootstrap,
+            server_url=server_url,
+            tls_san=cfg.cluster.tls_san,
+        ).encode()
+        payload = seed.build_seed_payload(uuid, name, role, config_bytes)
+        with tempfile.TemporaryDirectory(prefix="k3s-seed-") as temp:
+            artifact = Path(temp) / seed_volume
+            seed.build_seed_iso(payload, artifact)
+            # Reject collisions before entering compensation: none of these resources is ours.
+            present = {v.name() for v in storage.listAllVolumes(0)}
+            if {volume, seed_volume} & present or self._lookup(conn, uuid) is not None:
+                raise poolmod.PoolError("allocated domain or volumes already exist")
+            launch_ready = False
             try:
-                self._delete(conn, uuid, expected_volume=volume)
+                dom = conn.defineXML(domain_xml)
+                storage.createXML(domxml.build_volume_xml(cfg, volume=volume), 0)
+                seed_vol = storage.createXML(
+                    domxml.build_seed_volume_xml(
+                        volume=seed_volume,
+                        capacity=artifact.stat().st_size,
+                    ),
+                    0,
+                )
+                seed.upload_seed(conn, seed_vol, artifact)
+                node_meta = node_meta.advanced(meta.BOOTING)
+                meta.write(dom, node_meta)
+                launch_ready = True
+                dom.create()
             except Exception:
-                log.exception("rollback of %s did not fully succeed", name)
-            raise
+                if not launch_ready:
+                    try:
+                        self._delete_if_current(conn, uuid, 1, meta.CREATING)
+                    except Exception:
+                        log.exception("preserving uncertain or partially cleaned node %s", name)
+                raise
 
-        return self._node_from(dom, node_meta), server_url
+        # No stats call: create() has just succeeded, so the domain is running,
+        # and its vcpu/memory are the ones we defined it with a moment ago.
+        return self._node_from(dom, node_meta, {"state.state": libvirt.VIR_DOMAIN_RUNNING})
 
     # -- delete ------------------------------------------------------------
 
     def delete_by_name(self, name: str) -> None:
-        pattern = names.name_pattern(self.cfg.vm.name_prefix)
-        if not pattern.match(name):
-            # Reject before any lookup: a name we could not have issued must
-            # never reach a destructive call.
-            raise NodeNotFound(name)
+        # get() rejects a name this deployment could not have issued before any
+        # lookup, so one is never resolved into a destructive call.
+        uuid = self.get(name).uuid
         with self.lock:
-            uuid = self.cm.read(lambda conn: self._uuid_for(conn, name))
             self.cm.call(lambda conn: self._delete(conn, uuid))
-
-    def _uuid_for(self, conn: libvirt.virConnect, name: str) -> str:
-        try:
-            dom = conn.lookupByName(name)
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                raise NodeNotFound(name) from exc
-            raise
-        if meta.try_read(dom) is None:
-            raise NodeNotFound(name)
-        return dom.UUIDString()
 
     def delete(self, uuid: str) -> None:
         with self.lock:
             self.cm.call(lambda conn: self._delete(conn, uuid))
 
+    def delete_if_current(self, uuid: str, generation: int, expected_state: str) -> bool:
+        with self.lock:
+            return self.cm.call(
+                lambda conn: self._delete_if_current(conn, uuid, generation, expected_state)
+            )
+
+    def _delete_if_current(
+        self,
+        conn: libvirt.virConnect,
+        uuid: str,
+        generation: int,
+        expected_state: str,
+    ) -> bool:
+        meta.check_compatible(conn)
+        dom = self._lookup(conn, uuid)
+        if dom is None:
+            return False
+        current = meta.try_read(dom)
+        if (
+            current is None
+            or not self._in_scope(conn, current)
+            or current.generation != generation
+            or current.state != expected_state
+        ):
+            return False
+        self._delete(conn, uuid)
+        return True
+
     def _delete(
         self,
         conn: libvirt.virConnect,
         uuid: str,
-        *,
-        expected_volume: str | None = None,
     ) -> None:
         """Idempotent teardown.  Safe to call twice, or on a half-built node."""
-        try:
-            dom = conn.lookupByUUIDString(uuid)
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
-                raise
-            dom = None
-
-        volume = expected_volume
-        if dom is not None:
-            node_meta = meta.try_read(dom)
-            if node_meta is None:
-                if expected_volume is None:
-                    # Not ours. Refuse rather than guess.
-                    raise NodeNotFound(uuid)
-            else:
-                volume = node_meta.volume
-                # Bump the generation before anything destructive so a worker
-                # that wakes up later cannot write over the replacement.
-                try:
-                    meta.write(dom, node_meta.bumped().advanced(meta.DELETING))
-                except libvirt.libvirtError:
-                    log.warning("could not mark %s as deleting", uuid, exc_info=True)
-
-            if dom.isActive():
-                try:
-                    dom.destroy()
-                except libvirt.libvirtError as exc:
-                    if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
-                        raise
-
-        # Volume before undefine: if this fails the domain stays defined in
-        # 'deleting', ownership intact, and reconciliation retries.
-        if volume:
-            self._delete_volume(conn, volume)
-
-        if dom is not None:
-            self._undefine(dom)
-
-    def _delete_volume(self, conn: libvirt.virConnect, volume: str) -> None:
-        try:
-            storage = self._pool(conn)
-            storage.storageVolLookupByName(volume).delete(0)
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() in (
-                libvirt.VIR_ERR_NO_STORAGE_VOL,
-                libvirt.VIR_ERR_NO_STORAGE_POOL,
+        meta.check_compatible(conn)
+        dom = self._lookup(conn, uuid)
+        if dom is None:
+            return
+        node_meta = meta.try_read(dom)
+        if node_meta is None or not self._in_scope(conn, node_meta):
+            raise NodeNotFound(uuid)
+        storage = conn.storagePoolLookupByUUIDString(node_meta.pool_uuid)
+        claims = (node_meta.volume, node_meta.seed_volume)
+        expected_name = names.node_name(node_meta.scope_prefix, UUID(uuid).hex)
+        if dom.name() != expected_name or claims != (
+            names.volume_name(expected_name),
+            names.seed_volume_name(expected_name),
+        ):
+            raise poolmod.PoolError("metadata claims do not match domain identity")
+        paths = {posixpath.normpath(str(domxml.volume_path(storage, name))) for name in claims}
+        if posixpath.normpath(str(self.cfg.vm.base_image)) in paths:
+            raise poolmod.PoolError("a claim names the base image")
+        flags = [libvirt.VIR_DOMAIN_XML_INACTIVE]
+        if dom.isActive():
+            flags.append(0)
+        for flag in flags:
+            root = ET.fromstring(dom.XMLDesc(flag))
+            sources = root.findall("./devices/disk/source")
+            if (
+                len(root.findall("./devices/disk")) != 2
+                or len(sources) != 2
+                or {poolmod.source_path(conn, s) for s in sources} != paths
             ):
-                return
-            raise
+                raise poolmod.PoolError("domain disks do not match its two volume claims")
+        if paths & poolmod.referenced_disk_paths(
+            conn,
+            exclude_uuid=uuid,
+            strict_uuids={dom.UUIDString() for dom, _, _ in self._managed(conn)},
+        ):
+            raise poolmod.PoolError("another domain references a claimed volume")
+        for name in claims:
+            try:
+                vol = storage.storageVolLookupByName(name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise
+            else:
+                if posixpath.normpath(vol.path()) != posixpath.normpath(
+                    str(domxml.volume_path(storage, name))
+                ):
+                    raise poolmod.PoolError("volume path does not match its claim")
+
+        if node_meta.state != meta.DELETING:
+            meta.write(dom, node_meta.bumped().advanced(meta.DELETING))
+        # No destructive action follows an ambiguous intent write.
+        confirmed = meta.read(dom)
+        if confirmed.state != meta.DELETING or confirmed != (
+            node_meta
+            if node_meta.state == meta.DELETING
+            else node_meta.bumped().advanced(meta.DELETING)
+        ):
+            raise poolmod.PoolError("deletion intent could not be confirmed")
+        if dom.isActive():
+            dom.destroy()
+        if dom.isActive():
+            raise poolmod.PoolError("domain is still active after destroy")
+        # Cooperating administrators must not attach disks while deletion runs.
+        if paths & poolmod.referenced_disk_paths(
+            conn,
+            exclude_uuid=uuid,
+            strict_uuids={dom.UUIDString() for dom, _, _ in self._managed(conn)},
+        ):
+            raise poolmod.PoolError("another domain references a claimed volume")
+        for name in claims:
+            try:
+                storage.storageVolLookupByName(name).delete(0)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise
+        for name in claims:
+            try:
+                storage.storageVolLookupByName(name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise
+            else:
+                raise poolmod.PoolError("claimed volume still exists after deletion")
+        self._undefine(dom)
 
     @staticmethod
     def _undefine(dom: libvirt.virDomain) -> None:
@@ -490,7 +631,8 @@ class NodeManager:
         with self.lock:
 
             def run(conn: libvirt.virConnect) -> int:
-                uuids = [dom.UUIDString() for dom, _ in self._managed(conn)]
+                meta.check_compatible(conn)
+                uuids = [dom.UUIDString() for dom, _, _ in self._managed(conn)]
                 for uuid in uuids:
                     self._delete(conn, uuid)
                 return len(uuids)
@@ -499,33 +641,24 @@ class NodeManager:
 
     # -- orphans -----------------------------------------------------------
 
-    def unclaimed_volumes(self) -> set[str]:
+    def require_owned_pool(self) -> poolmod.PoolStatus:
+        """Refuse to run against a pool that is not exclusively ours."""
+        return self.cm.read(
+            lambda conn: poolmod.require_owned(self._pool(conn), self.cfg.vm.name_prefix)
+        )
+
+    def pool_status(self) -> poolmod.PoolStatus:
+        return self.cm.read(lambda conn: poolmod.inspect(self._pool(conn), self.cfg.vm.name_prefix))
+
+    def unclaimed_volumes(self, status: poolmod.PoolStatus | None = None) -> set[str]:
+        """Overlays no managed domain claims.  Reuses *status* if given."""
+
         def run(conn: libvirt.virConnect) -> set[str]:
-            claimed = {m.volume for _, m in self._managed(conn)}
-            return poolmod.unclaimed_volumes(
-                conn, self._pool(conn), self.cfg.vm.name_prefix, claimed
+            storage = self._pool(conn)
+            current = (
+                poolmod.inspect(storage, self.cfg.vm.name_prefix) if status is None else status
             )
+            claimed = {v for _, m, _ in self._managed(conn) for v in (m.volume, m.seed_volume)}
+            return poolmod.unclaimed_volumes(conn, storage, current, claimed)
 
         return self.cm.read(run)
-
-    def delete_volume(self, volume: str) -> None:
-        if not names.volume_pattern(self.cfg.vm.name_prefix).match(volume):
-            raise ValueError(f"{volume!r} is not an overlay this deployment owns")
-        with self.lock:
-            self.cm.call(lambda conn: self._delete_volume(conn, volume))
-
-
-def with_observations(
-    node: Node,
-    *,
-    service: str | None = None,
-    progress: str | None = None,
-    log_text: str | None = None,
-) -> Node:
-    """Attach in-memory observations to a node for rendering."""
-    return replace(
-        node,
-        service=service if service is not None else node.service,
-        progress=progress if progress is not None else node.progress,
-        log=log_text if log_text is not None else node.log,
-    )

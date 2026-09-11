@@ -12,15 +12,17 @@ import dataclasses
 
 import pytest
 
-from k3s_kvm_demo import config as configmod, meta, provision
+from k3s_kvm_demo import config as configmod, meta
 
-from .conftest import is_firstboot, is_probe, result
+from .conftest import is_status, observe, result
 
 UNSAFE = [
     ("POST", "/deploy/agent"),
     ("POST", "/deploy/server"),
     ("POST", "/reset"),
     ("POST", "/prune-nodes"),
+    ("POST", "/kubeconfig/download"),
+    ("POST", "/kubeconfig/copy"),
     ("POST", "/nodes/k3s-node-" + "0" * 32 + "/kill"),
 ]
 
@@ -65,59 +67,70 @@ def test_a_cross_origin_post_changes_nothing(client, manager):
 # -- output escaping -------------------------------------------------------
 
 
-def test_guest_output_is_escaped_before_it_reaches_the_page(client, manager, agent):
-    """Guest stderr is attacker-influenced in the sense that we do not control
-    the image; it must never render as markup."""
+def test_arbitrary_guest_output_is_not_displayed(client, manager, agent, observer):
     payload = "<script>alert('xss')</script> & \"quotes\""
-    agent.responses = [(is_firstboot, result(1, stderr=payload))]
+    agent.responses = [(is_status, result(1, stdout=payload, stderr=payload))]
     client.post("/deploy/server")
+    observe(observer)
 
     page = client.get("/nodes").text
     assert "<script>alert" not in page
-    assert "&lt;script&gt;" in page
-    assert "&amp;" in page
+    assert "&lt;script&gt;" not in page
+    assert "guest status unknown" in page
+    assert manager.list_nodes()[0].state == meta.BOOTING
 
 
-def test_a_failure_reason_is_escaped(client, manager, agent, conn_factory):
-    agent.responses = [(is_firstboot, result(1, stderr="<b>bold</b> failure"))]
+def test_a_persisted_failure_reason_is_escaped(client, manager):
     client.post("/deploy/server")
+    node = manager.list_nodes()[0]
+    manager.update_state(node.uuid, node.generation, meta.FAILED, error="<b>bold</b> & failure")
 
     page = client.get("/nodes").text
     assert "<b>bold</b>" not in page
     assert "&lt;b&gt;bold&lt;/b&gt;" in page
+    assert "&amp; failure" in page
 
 
-def test_the_token_never_appears_in_any_response(client, cfg, agent):
+@pytest.mark.parametrize("exitcode", [0, 1])
+def test_the_token_never_appears_in_any_response(client, cfg, agent, observer, exitcode):
     agent.responses = [
-        (is_firstboot, result(1, stderr=f"failed with token {cfg.cluster.token}")),
-        (is_probe, result(0)),
+        (is_status, result(exitcode, stdout=cfg.cluster.token, stderr=cfg.cluster.token)),
     ]
     client.post("/deploy/server")
+    observe(observer)
 
     for path in ("/", "/nodes", "/healthz"):
         assert cfg.cluster.token not in client.get(path).text, path
 
 
-def test_the_token_is_redacted_from_stored_logs(provisioner, manager, cfg, agent):
-    agent.responses = [(is_firstboot, result(1, stderr=f"token={cfg.cluster.token}"))]
-    node, url = manager.create(meta.ROLE_SERVER)
-    provisioner.submit(node, url)
+def test_guest_output_is_not_retained_in_metadata_or_observations(
+    observer, manager, cfg, agent, conn
+):
+    agent.responses = [(is_status, result(1, stderr=f"token={cfg.cluster.token}"))]
+    node = manager.create(meta.ROLE_SERVER)
+    observe(observer)
 
-    decorated = provisioner.decorate(manager.list_nodes())[0]
-    assert cfg.cluster.token not in decorated.log
-    assert "***" in decorated.log
+    decorated = observer.decorate(manager.list_nodes())[0]
+    assert not decorated.log
+    assert decorated.error is None
+    assert cfg.cluster.token not in repr(observer._observations)
+    assert cfg.cluster.token not in conn.lookupByUUIDString(node.uuid).XMLDesc(0)
 
 
-def test_the_token_stays_out_of_log_records(provisioner, manager, cfg, agent, caplog):
-    agent.responses = [(is_firstboot, result(1, stderr=f"token={cfg.cluster.token}"))]
-    node, url = manager.create(meta.ROLE_SERVER)
+@pytest.mark.parametrize("exitcode", [0, 1])
+def test_the_token_stays_out_of_log_records(observer, manager, cfg, agent, caplog, exitcode):
+    agent.responses = [
+        (
+            is_status,
+            result(
+                exitcode, stdout=f"token={cfg.cluster.token}", stderr=f"token={cfg.cluster.token}"
+            ),
+        )
+    ]
+    manager.create(meta.ROLE_SERVER)
     with caplog.at_level("DEBUG"):
-        provisioner.submit(node, url)
+        observe(observer)
     assert cfg.cluster.token not in caplog.text
-
-
-def test_redaction_covers_repeated_occurrences():
-    assert provision.redact("a X b X c", "X") == "a *** b *** c"
 
 
 # -- the configuration guard ----------------------------------------------

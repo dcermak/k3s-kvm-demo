@@ -55,6 +55,19 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
 }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions form { margin: 0; }
+
+.kubeconfig { margin-bottom: 20px; }
+.kubeconfig textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
 
 .btn {
   font-family: var(--mono);
@@ -107,6 +120,23 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
   background: var(--card);
 }
 
+.flash { display: flex; align-items: flex-start; gap: 12px; }
+.flash-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.flash-dismiss {
+  flex: none;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 20px;
+  cursor: pointer;
+}
+.flash-dismiss:hover { background: rgba(0, 0, 0, 0.06); }
+.flash-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .flash-info { border-color: rgba(16, 185, 129, 0.4); color: var(--emerald-dark); }
 .flash-error { border-color: rgba(186, 26, 26, 0.4); color: var(--ruby); }
 .banner { border-color: rgba(217, 119, 6, 0.45); color: #7a4405; }

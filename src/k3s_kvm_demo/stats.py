@@ -6,13 +6,15 @@ renders ``cpu_percent``, ``mem_percent`` and ``kubelet`` only when they are not
 ``None``, so nothing else has to move.
 
 Live CPU and memory
-    ``conn.getAllDomainStats(libvirt.VIR_DOMAIN_STATS_CPU_TOTAL |
-    libvirt.VIR_DOMAIN_STATS_BALLOON)`` returns ``(domain, stats)`` pairs.  CPU
-    percentage is the delta of ``cpu.time`` (nanoseconds) between two samples
-    divided by the elapsed wall time and the vCPU count, so this module needs
-    to keep the previous sample.  Memory is ``1 - balloon.usable /
-    balloon.current``; both keys are optional, so use ``.get``.  The domains
-    already carry ``<memballoon model='virtio'/>`` for exactly this.
+    ``NodeManager`` already issues ``getAllDomainStats`` once per listing (see
+    ``libvirtctl.DOMAIN_STATS``), so adding ``VIR_DOMAIN_STATS_CPU_TOTAL`` to
+    that flag set costs no extra round-trip and the figures arrive alongside
+    the ones the cards already show.  CPU percentage is the delta of
+    ``cpu.time`` (nanoseconds) between two samples divided by the elapsed wall
+    time and the vCPU count, so this module needs to keep the previous sample.
+    Memory is ``1 - balloon.usable / balloon.current``; both keys are optional,
+    so use ``.get`` — the test driver reports neither.  The domains already
+    carry ``<memballoon model='virtio'/>`` for exactly this.
 
 Real kubelet status
     Add a kubeconfig path to ``[cluster]``, then ``GET /api/v1/nodes`` and map

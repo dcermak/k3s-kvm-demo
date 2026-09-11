@@ -1,6 +1,10 @@
 <div id="grid" hx-get="/nodes" hx-trigger="every 2s" hx-swap="outerHTML">
   {% for flash in flashes %}
-  <p class="flash flash-{{ flash.level }}">{{ flash.text }}</p>
+  <div class="flash flash-{{ flash.level }}" data-notification data-notification-id="{{ flash.id }}">
+    <span class="flash-text">{{ flash.text }}</span>
+    <button type="button" class="flash-dismiss" data-dismiss-notification
+            aria-label="Dismiss notification">&times;</button>
+  </div>
   {% endfor %}
 
   {% if quorum.warning %}

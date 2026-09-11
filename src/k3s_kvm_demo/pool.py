@@ -12,14 +12,15 @@ ownership record reachable through the same API and privileges already needed.
 from __future__ import annotations
 
 import logging
-import time
+import posixpath
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from collections.abc import Set
+from dataclasses import dataclass
 from pathlib import Path
 
 import libvirt
 
-from . import names
+from . import domxml, meta, names
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +37,6 @@ class PoolStatus:
     marker: bool
     overlays: frozenset[str]
     unknown: tuple[str, ...]
-
-    @property
-    def is_owned(self) -> bool:
-        return self.marker and not self.unknown
 
 
 def build_pool_xml(name: str, path: Path | str) -> str:
@@ -97,6 +94,7 @@ def require_owned(pool: libvirt.virStoragePool, prefix: str) -> PoolStatus:
 
 def init_pool(conn: libvirt.virConnect, name: str, path: Path | str) -> libvirt.virStoragePool:
     """Create (or adopt an empty) pool and mark it as ours."""
+    meta.check_compatible(conn)
     path = Path(path)
     try:
         pool = conn.storagePoolLookupByName(name)
@@ -132,86 +130,102 @@ def init_pool(conn: libvirt.virConnect, name: str, path: Path | str) -> libvirt.
     return pool
 
 
-def referenced_disk_paths(conn: libvirt.virConnect) -> set[str]:
-    """Every disk source path referenced by *any* domain on the host.
+def source_path(conn: libvirt.virConnect, source: ET.Element) -> str:
+    """Resolve supported local disk sources without consulting the client filesystem."""
+    if len(source):
+        raise PoolError("unsupported nested disk source syntax")
+    attrs = set(source.attrib) - {"startupPolicy", "index"}
+    if attrs in ({"file"}, {"dev"}):
+        path = source.get("file") or source.get("dev")
+    elif attrs == {"pool", "volume"}:
+        storage = conn.storagePoolLookupByName(source.get("pool"))
+        volume = source.get("volume")
+        if not volume or "/" in volume or volume in (".", ".."):
+            raise PoolError("unsafe volume reference")
+        try:
+            path = storage.storageVolLookupByName(volume).path()
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                raise
+            path = str(domxml.volume_path(storage, volume))
+    else:
+        raise PoolError("unsupported disk source syntax; cannot prove exclusive ownership")
+    if not path or not path.startswith("/"):
+        raise PoolError("disk references must be absolute local paths")
+    return posixpath.normpath(path)
 
-    Not just managed ones: a volume an unrelated VM happens to use must never
-    be considered an orphan, however it got into the pool.
+
+def referenced_disk_paths(
+    conn: libvirt.virConnect,
+    *,
+    exclude_uuid: str | None = None,
+    strict: bool = False,
+    strict_uuids: Set[str] | None = None,
+) -> set[str]:
+    """Collect all live and persistent references, with optional backing-chain validation.
+
+    Inactive XML can omit backing images that QEMU would discover on startup.
+    Require complete evidence for all domains with strict=True, or just strict_uuids.
+    Scoped deletion assumes foreign images never depend on deployment-owned volumes;
+    hidden foreign backing references cannot be detected. Unscoped, non-strict scans
+    are diagnostics, not authorization to delete a volume.
     """
     paths: set[str] = set()
     for dom in conn.listAllDomains(0):
-        try:
-            xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-        except libvirt.libvirtError:
+        uuid = dom.UUIDString()
+        if uuid == exclude_uuid:
             continue
-        for source in ET.fromstring(xml).findall("./devices/disk/source"):
-            file_path = source.get("file") or source.get("dev")
-            if file_path:
-                paths.add(file_path)
+        require_chain = strict or (strict_uuids is not None and uuid in strict_uuids)
+        flags = [libvirt.VIR_DOMAIN_XML_INACTIVE] if dom.isPersistent() else [0]
+        if dom.isActive() and dom.isPersistent():
+            flags.append(0)
+        for flag in flags:
+            root = ET.fromstring(dom.XMLDesc(flag))
+            for disk in root.findall("./devices/disk"):
+                for source in disk.findall(".//source"):
+                    paths.add(source_path(conn, source))
+                for path in disk.findall(".//backingStore/path"):
+                    paths.add(source_path(conn, ET.Element("source", {"file": path.text or ""})))
+                if not require_chain:
+                    continue
+                if disk.get("device") == "cdrom" and disk.find("readonly") is not None:
+                    continue
+                layer = disk
+                fmt = disk.find("driver")
+                while True:
+                    sources = layer.findall("source")
+                    if len(sources) != 1:
+                        raise PoolError(f"cannot establish disk source for domain {dom.name()!r}")
+                    kind = fmt.get("type") if fmt is not None else None
+                    backing = layer.findall("backingStore")
+                    if len(backing) > 1:
+                        raise PoolError("unsupported multiple backing stores")
+                    if kind == "raw" and not backing:
+                        break
+                    if kind not in {"raw", "qcow2"} or not backing:
+                        raise PoolError(
+                            f"cannot prove complete backing chain for domain {dom.name()!r}; "
+                            "provide explicit disk formats and a backingStore chain ending in "
+                            "<backingStore/> after verifying the image's backing files"
+                        )
+                    layer = backing[0]
+                    if not layer.attrib and not len(layer) and not (layer.text or "").strip():
+                        break
+                    fmt = layer.find("format")
     return paths
-
-
-@dataclass
-class OrphanTracker:
-    """Requires a volume to stay unclaimed before it is eligible for deletion.
-
-    Age is measured from the first observation that saw the volume unclaimed
-    rather than from a filesystem timestamp: libvirt exposes no volume mtime,
-    and the pool directory is often unreadable by the service account.  A
-    restart resets the clock, which errs safely.
-    """
-
-    min_age_s: float
-    min_passes: int = 2
-    _first_seen: dict[str, float] = field(default_factory=dict)
-    _passes: dict[str, int] = field(default_factory=dict)
-
-    def observe(
-        self,
-        unclaimed: set[str],
-        *,
-        now: float | None = None,
-    ) -> list[str]:
-        """Record this pass and return the volumes now eligible for deletion."""
-        now = time.monotonic() if now is None else now
-        for gone in set(self._first_seen) - unclaimed:
-            del self._first_seen[gone]
-            self._passes.pop(gone, None)
-
-        eligible = []
-        for name in sorted(unclaimed):
-            self._first_seen.setdefault(name, now)
-            self._passes[name] = self._passes.get(name, 0) + 1
-            old_enough = now - self._first_seen[name] >= self.min_age_s
-            seen_enough = self._passes[name] >= self.min_passes
-            if old_enough and seen_enough:
-                eligible.append(name)
-        return eligible
-
-    def forget(self, name: str) -> None:
-        self._first_seen.pop(name, None)
-        self._passes.pop(name, None)
 
 
 def unclaimed_volumes(
     conn: libvirt.virConnect,
     pool: libvirt.virStoragePool,
-    prefix: str,
+    status: PoolStatus,
     claimed: set[str],
 ) -> set[str]:
-    """Overlays in the pool that no domain on the host lays claim to."""
-    status = inspect(pool, prefix)
-    target = Path(_pool_path(pool))
+    """Diagnostic candidates with no visible claim; hidden backing references may exist."""
+    target = domxml.pool_target_path(pool)
     referenced = referenced_disk_paths(conn)
     return {
         name
         for name in status.overlays
-        if name not in claimed and str(target / name) not in referenced
+        if name not in claimed and posixpath.normpath(str(target / name)) not in referenced
     }
-
-
-def _pool_path(pool: libvirt.virStoragePool) -> str:
-    path = ET.fromstring(pool.XMLDesc(0)).findtext("target/path")
-    if not path:
-        raise PoolError(f"storage pool {pool.name()!r} has no target path")
-    return path

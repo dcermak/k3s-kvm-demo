@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.110",
     "jinja2>=3.1",
     "libvirt-python>=9.0",
+    "pyyaml>=6.0",
     "uvicorn>=0.27",
 ]
 
@@ -21,7 +22,6 @@ dev = [
     # and the suite treats warnings as errors.
     "httpx2>=2.12",
     "pytest>=8.0",
-    "pyyaml>=6.0",
 ]
 
 [build-system]

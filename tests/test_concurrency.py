@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 
-from k3s_kvm_demo import meta, provision
+from k3s_kvm_demo import meta
 from k3s_kvm_demo.libvirtctl import DeployRefused
 
 
@@ -49,8 +49,9 @@ def test_two_initial_servers_yield_exactly_one_bootstrap(manager):
 
 
 def test_concurrent_deploys_respect_the_node_limit(manager, cfg):
-    server, _ = manager.create(meta.ROLE_SERVER)
+    server = manager.create(meta.ROLE_SERVER)
     manager.update_state(server.uuid, server.generation, meta.CONFIGURED)
+    manager.join_ready = lambda node: True
 
     outcomes = run_together([lambda: manager.create(meta.ROLE_AGENT)] * 8)
     refusals = [value for status, value in outcomes if status == "error"]
@@ -62,8 +63,9 @@ def test_concurrent_deploys_respect_the_node_limit(manager, cfg):
 
 
 def test_concurrent_deploys_never_collide_on_a_name(manager):
-    server, _ = manager.create(meta.ROLE_SERVER)
+    server = manager.create(meta.ROLE_SERVER)
     manager.update_state(server.uuid, server.generation, meta.CONFIGURED)
+    manager.join_ready = lambda node: True
 
     run_together([lambda: manager.create(meta.ROLE_AGENT)] * 6)
 
@@ -75,9 +77,10 @@ def test_concurrent_deploys_never_collide_on_a_name(manager):
 
 
 def test_delete_and_create_do_not_interleave(manager):
-    server, _ = manager.create(meta.ROLE_SERVER)
+    server = manager.create(meta.ROLE_SERVER)
     manager.update_state(server.uuid, server.generation, meta.CONFIGURED)
-    victim, _ = manager.create(meta.ROLE_AGENT)
+    manager.join_ready = lambda node: True
+    victim = manager.create(meta.ROLE_AGENT)
 
     outcomes = run_together(
         [
@@ -98,40 +101,83 @@ def test_delete_and_create_do_not_interleave(manager):
 
 
 def test_reset_racing_creates_leaves_no_orphans(manager):
-    server, _ = manager.create(meta.ROLE_SERVER)
+    server = manager.create(meta.ROLE_SERVER)
     manager.update_state(server.uuid, server.generation, meta.CONFIGURED)
+    manager.join_ready = lambda node: True
 
     run_together([lambda: manager.create(meta.ROLE_AGENT)] * 3 + [manager.reset, manager.reset])
     assert manager.unclaimed_volumes() == set()
 
 
-def test_a_worker_cannot_write_state_for_a_node_that_was_replaced(manager, cfg, provisioner):
+def test_a_worker_cannot_write_state_for_a_node_that_was_replaced(manager):
     """The generation guard.
 
     A job stamped before a kill must not report success afterwards, even
     though the node it names has gone.
     """
-    node, _ = manager.create(meta.ROLE_SERVER)
-    stale = provision.Job(uuid=node.uuid, generation=node.generation)
+    node = manager.create(meta.ROLE_SERVER)
 
     manager.delete(node.uuid)
-    replacement, _ = manager.create(meta.ROLE_SERVER)
+    replacement = manager.create(meta.ROLE_SERVER)
 
-    provisioner._fail(stale, "late report from a killed node")
+    assert not manager.update_state(node.uuid, node.generation, meta.FAILED, error="late report")
 
     assert manager.get(replacement.name).state == meta.BOOTING
     assert manager.get(replacement.name).error is None
 
 
-def test_a_job_is_claimed_only_once(provisioner):
-    first = provisioner._claim("uuid-1", 1)
-    assert first is not None
-    assert provisioner._claim("uuid-1", 1) is None
-    provisioner._release("uuid-1")
-    assert provisioner._claim("uuid-1", 1) is not None
+def test_stale_incomplete_snapshot_cannot_delete_launch_ready_node(manager, conn):
+    node = manager.create(meta.ROLE_SERVER)
+    dom = conn.lookupByUUIDString(node.uuid)
+    meta.write(dom, meta.read(dom).advanced(meta.CREATING))
+    stale = manager.get(node.name)
+    manager.update_state(node.uuid, node.generation, meta.BOOTING)
+    assert not manager.delete_if_current(stale.uuid, stale.generation, stale.state)
+    assert manager.get(node.name).state == meta.BOOTING
 
 
-def test_claiming_is_atomic_across_threads(provisioner):
-    outcomes = run_together([lambda: provisioner._claim("uuid-2", 1)] * 8)
-    claims = [value for status, value in outcomes if status == "ok" and value is not None]
-    assert len(claims) == 1
+def test_compare_and_set_serializes_observers(manager):
+    node = manager.create(meta.ROLE_SERVER)
+    outcomes = run_together(
+        [
+            lambda state=state: manager.update_state(
+                node.uuid,
+                node.generation,
+                state,
+                expected_states={meta.BOOTING},
+            )
+            for state in (meta.CONFIGURED, meta.FAILED)
+        ]
+    )
+    assert sorted(value for status, value in outcomes if status == "ok") == [False, True]
+
+
+def test_cleanup_and_state_update_share_one_lock(manager, conn, monkeypatch):
+    node = manager.create(meta.ROLE_SERVER)
+    dom = conn.lookupByUUIDString(node.uuid)
+    meta.write(dom, meta.read(dom).advanced(meta.CREATING))
+    read_entered = threading.Event()
+    release = threading.Event()
+    real = manager._delete
+
+    def paused(conn, uuid):
+        read_entered.set()
+        assert release.wait(5)
+        return real(conn, uuid)
+
+    monkeypatch.setattr(manager, "_delete", paused)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        deleting = executor.submit(
+            manager.delete_if_current,
+            node.uuid,
+            node.generation,
+            meta.CREATING,
+        )
+        assert read_entered.wait(5)
+        updating = executor.submit(manager.update_state, node.uuid, node.generation, meta.BOOTING)
+        try:
+            assert not updating.done()
+        finally:
+            release.set()
+        assert deleting.result(timeout=5)
+        assert not updating.result(timeout=5)

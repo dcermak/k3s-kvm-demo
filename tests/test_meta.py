@@ -26,17 +26,9 @@ DOMAIN_XML = """
 
 
 @pytest.fixture
-def domain():
-    conn = libvirt.open(TEST_URI)
-    dom = conn.defineXML(DOMAIN_XML)
-    yield dom
-    try:
-        if dom.isActive():
-            dom.destroy()
-        dom.undefine()
-    except libvirt.libvirtError:
-        pass
-    conn.close()
+def domain(conn):
+    # No teardown: the autouse libvirt_clean fixture wipes every domain.
+    return conn.defineXML(DOMAIN_XML)
 
 
 def test_round_trip_through_a_domain_definition():
@@ -115,23 +107,20 @@ def test_unmanaged_domain_reads_as_not_ours(domain):
         meta.read(domain)
 
 
-def test_unrecognised_state_is_preserved_rather_than_rejected(domain):
-    """Forward compatibility: a node written by a newer version stays listed
-    and stays killable."""
+def test_unrecognised_state_fails_closed(domain):
     meta.write(domain, make_meta(state="quiescing"))
-    parsed = meta.read(domain)
-    assert parsed.state == "quiescing"
-    assert parsed.is_known_state is False
+    with pytest.raises(meta.CompatibilityError):
+        meta.read(domain)
 
 
-def test_malformed_metadata_is_not_managed():
+def test_malformed_metadata_is_not_silently_absent():
     for broken in ("<node><role>bogus</role></node>", "<other/>", "not xml", "<node/>"):
-        with pytest.raises(meta.NotManaged):
+        with pytest.raises(meta.CompatibilityError):
             meta.parse(broken)
 
 
 def test_non_integer_generation_is_rejected():
-    with pytest.raises(meta.NotManaged):
+    with pytest.raises(meta.CompatibilityError):
         meta.parse(
             "<node><role>agent</role><volume>v.qcow2</volume><generation>x</generation></node>"
         )
@@ -143,3 +132,87 @@ def test_generation_bump_and_advance_are_pure():
     assert original.generation == 3
     assert original.advanced(meta.FAILED, error="why").state == meta.FAILED
     assert original.state == meta.BOOTING
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_legacy_metadata_is_detected_even_without_v2(domain, live):
+    if live:
+        domain.create()
+    domain.setMetadata(
+        libvirt.VIR_DOMAIN_METADATA_ELEMENT,
+        "<node><role>server</role></node>",
+        meta.KEY,
+        meta.LEGACY_NS,
+        libvirt.VIR_DOMAIN_AFFECT_LIVE if live else libvirt.VIR_DOMAIN_AFFECT_CONFIG,
+    )
+    with pytest.raises(meta.CompatibilityError):
+        meta.try_read(domain)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "seed_volume",
+        "pool_uuid",
+        "scope_prefix",
+        "guest_protocol",
+        "generation",
+        "created",
+    ],
+)
+def test_required_v2_fields_cannot_be_omitted(field):
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(meta.to_xml(make_meta()))
+    root.remove(root.find(field))
+    with pytest.raises(meta.CompatibilityError):
+        meta.parse(ET.tostring(root, encoding="unicode"))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pool_uuid", "not-a-uuid"),
+        ("generation", "0"),
+        ("guest_protocol", "2"),
+        ("bootstrap", "yes"),
+        ("scope_prefix", "../bad"),
+        ("seed_volume", "base.iso"),
+        ("volume", "../../base.qcow2"),
+    ],
+)
+def test_invalid_v2_fields_fail_closed(field, value):
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(meta.to_xml(make_meta()))
+    root.find(field).text = value
+    with pytest.raises(meta.CompatibilityError):
+        meta.parse(ET.tostring(root, encoding="unicode"))
+
+
+def test_duplicate_and_foreign_namespace_fields_fail_closed():
+    xml = meta.to_xml(make_meta())
+    for extra in ("<role>agent</role>", '<role xmlns="urn:foreign">agent</role>'):
+        with pytest.raises(meta.CompatibilityError):
+            meta.parse(xml.replace("</node>", extra + "</node>"))
+
+
+def test_unmanaged_transient_domain_is_not_a_compatibility_error(conn):
+    dom = conn.createXML(DOMAIN_XML.replace("meta-probe", "transient-probe"), 0)
+    try:
+        assert meta.try_read(dom) is None
+    finally:
+        dom.destroy()
+
+
+def test_live_only_v2_metadata_is_not_silently_unmanaged(domain):
+    domain.create()
+    domain.setMetadata(
+        libvirt.VIR_DOMAIN_METADATA_ELEMENT,
+        meta.to_xml(make_meta()),
+        meta.KEY,
+        meta.NS,
+        libvirt.VIR_DOMAIN_AFFECT_LIVE,
+    )
+    with pytest.raises(meta.CompatibilityError, match="persistent ownership"):
+        meta.try_read(domain)

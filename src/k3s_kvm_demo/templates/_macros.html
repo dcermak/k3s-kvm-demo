@@ -1,0 +1,11 @@
+{# Every button in this app posts and swaps the whole grid, so the htmx
+   attributes are identical everywhere and live here once. #}
+{% macro action(url, label, classes="btn btn-ghost", confirm=None, icon=None) -%}
+<button class="{{ classes }}"
+        hx-post="{{ url }}" hx-target="#grid" hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        {% if confirm %}hx-confirm="{{ confirm }}"{% endif %}>
+  {%- if icon %}<span aria-hidden="true">{{ icon }}</span> {% endif -%}
+  {{ label }}
+</button>
+{%- endmacro %}

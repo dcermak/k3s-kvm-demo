@@ -1,11 +1,5 @@
-{% set tone = {
-     'configured': 'ok',
-     'booting': 'busy',
-     'configuring': 'busy',
-     'creating': 'busy',
-     'deleting': 'busy',
-     'failed': 'bad',
-   }.get(node.state, 'unknown') %}
+{% import "_macros.html" as ui %}
+{% set tone = node.tone %}
 <article class="card card-{{ tone }}">
   <header class="card-head">
     <span class="role role-{{ node.role }}" aria-hidden="true">
@@ -52,22 +46,12 @@
   <p class="error">{{ node.error }}</p>
   {% endif %}
 
-  {% if node.log %}
-  <details class="log">
-    <summary>firstboot output</summary>
-    <pre>{{ node.log }}</pre>
-  </details>
-  {% elif node.state == 'failed' %}
-  <p class="log-note">Output was not retained across a restart; the reason above is all we kept.</p>
+  {% if node.state == 'failed' or node.error %}
+  <p class="log-note">Inspect the guest journal with journalctl -u k3s-demo-prepare -u k3s-node, or recreate this node.</p>
   {% endif %}
 
   <footer class="card-foot">
-    <button class="btn btn-kill"
-            hx-post="/nodes/{{ node.name }}/kill"
-            hx-target="#grid" hx-swap="outerHTML"
-            hx-disabled-elt="this"
-            hx-confirm="Kill {{ node.short_name }}? The VM is destroyed immediately and its disk is deleted.">
-      Kill node
-    </button>
+    {{ ui.action("/nodes/" ~ node.name ~ "/kill", "Kill node", "btn btn-kill",
+                 confirm="Kill " ~ node.short_name ~ "? The VM is destroyed immediately and both disks are deleted.") }}
   </footer>
 </article>

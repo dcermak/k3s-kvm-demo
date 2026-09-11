@@ -1,12 +1,7 @@
-"""Running commands in a guest through the QEMU guest agent.
+"""Guest command execution. Launch and reaping calls are never retried.
 
-``provision.py`` depends on the :class:`Agent` protocol rather than on libvirt,
-so its state machine is testable without a VM.
-
-Two properties of the agent shape the API.  ``guest-exec-status`` *reaps* the
-process once it has exited, so polling is not idempotent and must never be
-retried automatically.  And the agent has no kill primitive, which is why the
-script is started under a marker that ``pkill -f`` can find.
+The guest agent has no kill primitive. Callers needing a guest-side deadline
+must launch their command under a timeout; ``run`` bounds only the host wait.
 """
 
 from __future__ import annotations
@@ -14,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -50,6 +46,20 @@ class ExecTimeout(Exception):
     """A guest command outlived its budget."""
 
 
+def _missing_pid(exc: libvirt.libvirtError) -> bool:
+    """Recognize a definitive QGA rejection, not a generic transport failure."""
+    message = str(exc)
+    return bool(
+        exc.get_error_code() == libvirt.VIR_ERR_INTERNAL_ERROR
+        and "guest agent command failed:" in message.lower()
+        and re.search(
+            r"\bPID(?:\s+['\"]?\d+['\"]?)?\s+(?:not found|does not exist)\b",
+            message,
+            re.IGNORECASE,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ExecResult:
     exitcode: int | None
@@ -68,7 +78,7 @@ class ExecResult:
 
 
 class Agent(Protocol):
-    """The narrow slice of guest-agent behaviour provisioning needs."""
+    """Guest-agent operations used by observation and maintenance."""
 
     def ping(self) -> None:
         """Raise :class:`AgentUnavailable` if the guest agent is not answering."""
@@ -103,7 +113,14 @@ class QemuAgent:
 
         def run(conn: libvirt.virConnect) -> str:
             dom = conn.lookupByUUIDString(self._uuid)
-            return libvirt_qemu.qemuAgentCommand(dom, request, self._timeout_s, 0)
+            try:
+                return libvirt_qemu.qemuAgentCommand(dom, request, self._timeout_s, 0)
+            except libvirt.libvirtError as exc:
+                # libvirt may turn a JSON QGA error into VIR_ERR_INTERNAL_ERROR.
+                # Only an explicit missing pid permits abandoning this status job.
+                if payload.get("execute") == "guest-exec-status" and _missing_pid(exc):
+                    raise AgentError(str(exc)) from exc
+                raise
 
         runner = self._cm.read if retry else self._cm.call
         try:
@@ -153,30 +170,6 @@ class QemuAgent:
         )
 
 
-def wait_for_agent(
-    agent: Agent,
-    *,
-    timeout_s: float,
-    interval_s: float = 2.0,
-    sleep: Callable[[float], None] = time.sleep,
-    now: Callable[[], float] = time.monotonic,
-    should_stop: Callable[[], bool] = lambda: False,
-) -> bool:
-    """Poll ``guest-ping`` until it answers.  False on timeout or cancellation."""
-    deadline = now() + timeout_s
-    while not should_stop():
-        try:
-            agent.ping()
-        except AgentUnavailable:
-            pass
-        else:
-            return True
-        if now() >= deadline:
-            return False
-        sleep(interval_s)
-    return False
-
-
 def run(
     agent: Agent,
     path: str,
@@ -190,14 +183,22 @@ def run(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> ExecResult:
     """Start a guest process and wait for it, within *timeout_s*."""
-    pid = agent.start(path, args, input_data=input_data)
     deadline = now() + timeout_s
+    if should_stop():
+        raise ExecTimeout("cancelled before starting the guest process")
+    if now() >= deadline:
+        raise ExecTimeout("guest process budget expired before launch")
+    pid = agent.start(path, args, input_data=input_data)
     while True:
         if should_stop():
             raise ExecTimeout("cancelled while waiting for the guest process")
-        result = agent.poll(pid)
-        if result is not None:
-            return result
         if now() >= deadline:
             raise ExecTimeout(f"guest process {pid} did not finish within {timeout_s:.0f}s")
-        sleep(interval_s)
+        result = agent.poll(pid)
+        if should_stop():
+            raise ExecTimeout("cancelled while waiting for the guest process")
+        if now() >= deadline:
+            raise ExecTimeout(f"guest process {pid} did not finish within {timeout_s:.0f}s")
+        if result is not None:
+            return result
+        sleep(min(interval_s, max(0.0, deadline - now())))

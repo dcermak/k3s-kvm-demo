@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import subprocess
+from dataclasses import fields
 
 import pytest
 
@@ -25,14 +27,17 @@ def test_defaults_survive_slots(config_values):
         "libvirt": config_values["libvirt"],
         "vm": {"base_image": config_values["vm"]["base_image"], "disk_gb": 4},
         "cluster": {"token": "t"},
-        "firstboot": {"script": config_values["firstboot"]["script"]},
     }
     cfg = load(minimal)
     assert cfg.vm.name_prefix == "k3s-node"
     assert cfg.vm.max_nodes == 8
-    assert cfg.server.port == 8000
-    assert cfg.firstboot.retry_backoff_s == (2, 5, 10, 30)
-    assert cfg.maintenance.reap_orphans is False
+    assert cfg.server.port == configmod.ServerConfig().port
+    assert cfg.observation == configmod.ObservationConfig(
+        interval_s=2, qga_timeout_s=2, stale_after_s=30
+    )
+    assert cfg.maintenance.shutdown_grace_s == 30
+    assert [field.name for field in fields(cfg.maintenance)] == ["shutdown_grace_s"]
+    assert not hasattr(cfg, "firstboot")
 
 
 def test_bind_must_be_loopback(config_values):
@@ -65,7 +70,7 @@ def test_base_image_must_exist_and_be_qcow2(config_values, tmp_path):
     assert "qcow2" in str(error)
 
 
-def test_token_and_script_are_required(config_values):
+def test_token_and_base_image_are_required(config_values):
     values = copy.deepcopy(config_values)
     del values["cluster"]["token"]
     expect_error(values, "cluster.token")
@@ -75,8 +80,8 @@ def test_token_and_script_are_required(config_values):
     expect_error(values, "cluster.token")
 
     values = copy.deepcopy(config_values)
-    values["firstboot"]["script"] = "/nonexistent/firstboot.sh.j2"
-    expect_error(values, "firstboot.script")
+    del values["vm"]["base_image"]
+    expect_error(values, "vm.base_image")
 
 
 def test_numeric_bounds_name_their_key(config_values):
@@ -84,10 +89,10 @@ def test_numeric_bounds_name_their_key(config_values):
         "vm.max_nodes": ("vm", "max_nodes", 0),
         "vm.vcpus": ("vm", "vcpus", 0),
         "vm.memory_mb": ("vm", "memory_mb", 128),
-        "firstboot.boot_timeout_s": ("firstboot", "boot_timeout_s", 0),
-        "firstboot.qga_timeout_s": ("firstboot", "qga_timeout_s", -1),
+        "observation.interval_s": ("observation", "interval_s", 0),
+        "observation.qga_timeout_s": ("observation", "qga_timeout_s", -1),
+        "observation.stale_after_s": ("observation", "stale_after_s", 0),
         "maintenance.shutdown_grace_s": ("maintenance", "shutdown_grace_s", 0),
-        "maintenance.orphan_min_age_s": ("maintenance", "orphan_min_age_s", -1),
     }
     for key, (table, field, bad) in cases.items():
         values = copy.deepcopy(config_values)
@@ -105,13 +110,39 @@ def test_bad_name_prefix_names_its_key(config_values):
     assert "63" in str(error)
 
 
-def test_retry_backoff_must_be_positive_integers(config_values):
+@pytest.mark.parametrize("section", [{}, {"script": "/old/firstboot.sh.j2"}])
+def test_firstboot_requires_migration(config_values, section):
     values = copy.deepcopy(config_values)
-    values["firstboot"]["retry_backoff_s"] = []
-    expect_error(values, "firstboot.retry_backoff_s")
+    values["firstboot"] = section
+    error = expect_error(values, "firstboot")
+    assert "guest" in str(error).lower()
+    assert "remov" in str(error).lower()
 
-    values["firstboot"]["retry_backoff_s"] = [1, 0]
-    expect_error(values, "firstboot.retry_backoff_s")
+
+def test_automatic_orphan_reaping_is_rejected(config_values):
+    values = copy.deepcopy(config_values)
+    values["maintenance"]["reap_orphans"] = True
+    expect_error(values, "maintenance.reap_orphans")
+
+
+def test_disabled_legacy_reaping_can_be_removed(config_values):
+    values = copy.deepcopy(config_values)
+    values["maintenance"]["reap_orphans"] = False
+    assert load(values) == load(config_values)
+
+
+@pytest.mark.parametrize("key", ["interval_s", "qga_timeout_s", "stale_after_s"])
+@pytest.mark.parametrize("value", [True, "2", 1.5])
+def test_observation_requires_integers(config_values, key, value):
+    values = copy.deepcopy(config_values)
+    values["observation"][key] = value
+    expect_error(values, f"observation.{key}")
+
+
+def test_observation_settings_are_loaded(config_values):
+    values = copy.deepcopy(config_values)
+    values["observation"] = {"interval_s": 3, "qga_timeout_s": 1, "stale_after_s": 45}
+    assert load(values).observation == configmod.ObservationConfig(3, 1, 45)
 
 
 def test_load_reports_missing_and_malformed_files(tmp_path):
@@ -124,10 +155,7 @@ def test_load_reports_missing_and_malformed_files(tmp_path):
         configmod.load(broken)
 
 
-def test_script_path_is_relative_to_the_config_file(tmp_path, config_values):
-    (tmp_path / "firstboot").mkdir()
-    script = tmp_path / "firstboot" / "firstboot.sh.j2"
-    script.write_text("#!/bin/sh\n")
+def test_load_records_source_and_observation_settings(tmp_path, config_values):
     toml = tmp_path / "config.toml"
     toml.write_text(
         "\n".join(
@@ -140,10 +168,43 @@ def test_script_path_is_relative_to_the_config_file(tmp_path, config_values):
                 "disk_gb = 4",
                 "[cluster]",
                 'token = "t"',
-                "[firstboot]",
-                'script = "firstboot/firstboot.sh.j2"',
+                "[observation]",
+                "interval_s = 5",
             ]
         )
     )
     cfg = configmod.load(toml)
-    assert cfg.firstboot.script == script
+    assert cfg.source == toml
+    assert cfg.observation.interval_s == 5
+
+
+def test_base_image_must_have_no_backing_chain(config_values, tmp_path):
+    overlay = tmp_path / "backed.qcow2"
+    subprocess.run(
+        [
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            config_values["vm"]["base_image"],
+            str(overlay),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    config_values["vm"]["base_image"] = str(overlay)
+    assert "standalone" in str(expect_error(config_values, "vm.base_image"))
+
+
+@pytest.mark.parametrize("interval,stale", [(30, 30), (31, 30)])
+def test_observation_must_allow_time_to_reap(config_values, interval, stale):
+    config_values["observation"].update(interval_s=interval, stale_after_s=stale)
+    expect_error(config_values, "observation.stale_after_s")
+
+
+def test_qga_calls_have_small_upper_bound(config_values):
+    config_values["observation"]["qga_timeout_s"] = 3
+    expect_error(config_values, "observation.qga_timeout_s")

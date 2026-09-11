@@ -1,0 +1,26 @@
+[Unit]
+Description=k3s demo node
+Wants=network-online.target
+Requires=k3s-demo-prepare.service
+After=network-online.target k3s-demo-prepare.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/libexec/k3s-demo-guest run
+ExecStartPost=/usr/local/libexec/k3s-demo-guest mark-started
+KillMode=process
+Delegate=yes
+Restart=always
+RestartSec=5s
+TimeoutStartSec=300
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

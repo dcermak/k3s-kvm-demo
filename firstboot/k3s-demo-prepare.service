@@ -1,0 +1,10 @@
+[Unit]
+Description=Prepare this k3s demo guest
+After=local-fs.target
+Before=k3s-node.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/k3s-demo-guest prepare
+TimeoutStartSec=120

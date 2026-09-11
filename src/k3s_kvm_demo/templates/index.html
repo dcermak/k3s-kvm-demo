@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+{% import "_macros.html" as ui %}<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -6,8 +6,9 @@
   <title>KVM Node Registry — k3s demo</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/notifications.js" defer></script>
 </head>
-<body>
+<body hx-history="false">
 <main class="page">
   <header class="page-header">
     <div>
@@ -18,31 +19,21 @@
       </p>
     </div>
     <nav class="actions">
-      <button class="btn btn-primary"
-              hx-post="/deploy/agent" hx-target="#grid" hx-swap="outerHTML"
-              hx-disabled-elt="this">
-        <span aria-hidden="true">＋</span> Deploy Node
-      </button>
-      <button class="btn btn-tertiary"
-              hx-post="/deploy/server" hx-target="#grid" hx-swap="outerHTML"
-              hx-disabled-elt="this">
-        <span aria-hidden="true">⬡</span> Deploy Control Plane node
-      </button>
-      <button class="btn btn-ghost"
-              hx-post="/prune-nodes" hx-target="#grid" hx-swap="outerHTML"
-              hx-disabled-elt="this"
-              hx-confirm="Delete Kubernetes Node objects for VMs that no longer exist? This does not remove etcd members.">
-        Prune Nodes
-      </button>
-      <button class="btn btn-ghost btn-danger-ghost"
-              hx-post="/reset" hx-target="#grid" hx-swap="outerHTML"
-              hx-disabled-elt="this"
-              hx-confirm="Destroy every demo VM and its disk, and start over?">
-        Reset
-      </button>
+      <button class="btn btn-ghost" hx-post="/kubeconfig/copy" hx-target="#kubeconfig-panel"
+              hx-disabled-elt="this">Copy kubeconfig</button>
+      <form method="post" action="/kubeconfig/download">
+        <button class="btn btn-ghost" type="submit">Download kubeconfig</button>
+      </form>
+      {{ ui.action("/deploy/agent", "Deploy Node", "btn btn-primary", icon="＋") }}
+      {{ ui.action("/deploy/server", "Deploy Control Plane node", "btn btn-tertiary", icon="⬡") }}
+      {{ ui.action("/prune-nodes", "Prune Nodes",
+                   confirm="Delete Kubernetes Node objects for VMs that no longer exist? This does not remove etcd members.") }}
+      {{ ui.action("/reset", "Reset", "btn btn-ghost btn-danger-ghost",
+                   confirm="Destroy every demo VM and its disk, and start over?") }}
     </nav>
   </header>
 
+  <div id="kubeconfig-panel" aria-live="polite"></div>
   {% include "_grid.html" %}
 </main>
 </body>

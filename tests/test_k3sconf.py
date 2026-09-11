@@ -163,19 +163,8 @@ def test_impossible_role_and_url_combinations_are_rejected():
         )
 
 
-def test_unit_runs_the_right_subcommand():
-    server = k3sconf.systemd_unit(meta.ROLE_SERVER)
-    agent = k3sconf.systemd_unit(meta.ROLE_AGENT)
-    assert "ExecStart=/usr/bin/env k3s server" in server
-    assert "ExecStart=/usr/bin/env k3s agent" in agent
-    for unit in (server, agent):
-        assert unit.startswith("[Unit]")
-        assert "[Install]\nWantedBy=multi-user.target" in unit
-        assert unit.count("ExecStartPre=") == 2
-    with pytest.raises(ValueError):
-        k3sconf.systemd_unit("bogus")
-
-
-def test_unit_values_cannot_smuggle_extra_directives():
-    with pytest.raises(k3sconf.InvalidUnitValue):
-        k3sconf._render_unit([("Service", [("ExecStart", "/bin/true\nUser=root")])])
+def test_only_configuration_is_rendered_on_the_host():
+    assert k3sconf.UNIT_NAME == "k3s-node.service"
+    assert k3sconf.CONFIG_PATH == "/etc/rancher/k3s/config.yaml"
+    assert not hasattr(k3sconf, "render_firstboot")
+    assert not hasattr(k3sconf, "systemd_unit")

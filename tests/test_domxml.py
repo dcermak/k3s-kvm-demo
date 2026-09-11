@@ -75,18 +75,33 @@ def test_domain_xml_has_what_provisioning_depends_on(cfg):
         node_meta=node_meta,
         domain_type=domxml.TYPE_KVM,
         disk_path="/pool/k3s-node-a.qcow2",
+        seed_path="/pool/k3s-node-a.iso",
     )
     root = ET.fromstring(xml)
     assert root.get("type") == "kvm"
 
     channels = root.findall("./devices/channel/target")
     assert any(c.get("name") == domxml.GUEST_AGENT_CHANNEL for c in channels), (
-        "guest-exec is the only channel into the guest"
+        "the observer needs a guest-agent channel"
     )
     assert root.find("./devices/memballoon") is not None, "stats.py will need this"
     assert root.find("./devices/interface/source").get("network") == cfg.libvirt.network
     assert root.find("./devices/disk/source").get("file") == "/pool/k3s-node-a.qcow2"
     assert root.find("cpu").get("mode") == "host-passthrough"
+    disks = root.findall("./devices/disk")
+    assert len(disks) == 2
+    backing = disks[0].find("backingStore")
+    assert backing.attrib == {"type": "file", "index": "1"}
+    assert backing.find("format").get("type") == "qcow2"
+    assert backing.find("source").get("file") == str(cfg.vm.base_image)
+    termination = backing.find("backingStore")
+    assert termination is not None
+    assert not termination.attrib and len(termination) == 0
+    assert disks[1].get("device") == "disk"
+    assert disks[1].find("target").attrib == {"dev": "vdb", "bus": "virtio"}
+    assert disks[1].find("driver").get("type") == "raw"
+    assert disks[1].find("source").get("file") == "/pool/k3s-node-a.iso"
+    assert disks[1].find("readonly") is not None
 
     stored = root.find(f"./metadata/{{{meta.NS}}}node")
     assert stored is not None
@@ -101,6 +116,7 @@ def test_test_driver_domains_omit_host_specific_devices(cfg):
         node_meta=make_meta(),
         domain_type=domxml.TYPE_TEST,
         disk_path="/pool/x.qcow2",
+        seed_path="/pool/x.iso",
     )
     root = ET.fromstring(xml)
     assert root.find("cpu") is None
@@ -125,11 +141,12 @@ def test_hostile_values_are_escaped_not_interpolated(cfg, tmp_path):
         node_meta=node_meta,
         domain_type=domxml.TYPE_TEST,
         disk_path='/pool/we\'re "here" & <there>.qcow2',
+        seed_path="/pool/seed.iso",
     )
     root = ET.fromstring(xml)
     assert root.find("./devices/disk/source").get("file") == '/pool/we\'re "here" & <there>.qcow2'
     stored = root.find(f"./metadata/{{{meta.NS}}}node")
-    assert meta.parse(ET.tostring(stored, encoding="unicode")).volume == hostile
+    assert stored.find(f"{{{meta.NS}}}volume").text == hostile
 
 
 def test_generated_domain_is_accepted_by_libvirt(cfg, marked_pool):
@@ -142,6 +159,7 @@ def test_generated_domain_is_accepted_by_libvirt(cfg, marked_pool):
         node_meta=make_meta(),
         domain_type=domxml.TYPE_TEST,
         disk_path="/default-pool/k3s-node-d.qcow2",
+        seed_path="/default-pool/k3s-node-d.iso",
     )
     dom = conn.defineXML(xml)
     try:
@@ -160,3 +178,10 @@ def test_volume_path_is_known_before_the_volume_exists(marked_pool):
     assert str(path).endswith("/k3s-node-e.qcow2")
     existing = {v.name() for v in marked_pool.listAllVolumes(0)}
     assert "k3s-node-e.qcow2" not in existing
+
+
+def test_seed_volume_is_raw_without_a_backing_store():
+    root = ET.fromstring(domxml.build_seed_volume_xml(volume="seed.iso", capacity=65536))
+    assert root.find("target/format").get("type") == "raw"
+    assert root.findtext("capacity") == "65536"
+    assert root.find("backingStore") is None
