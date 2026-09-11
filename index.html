@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+
+<html lang="en" style=""><head></head><body class="bg-gradient-to-br from-blue-50 via-white to-emerald-50 text-on-background font-body-md h-screen overflow-hidden flex selection:bg-primary-container selection:text-on-primary-container"><svg aria-hidden="true" class="inline-defs-container" style="position:absolute;width:0;height:0;overflow:hidden"></svg>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>KVM_CORE - Host Management</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&amp;family=Hanken+Grotesk:wght@400;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        "colors": {
+                "surface-container-low": "#f2f4f6",
+                "status-emerald": "#10B981",
+                "status-ruby": "#E11D48",
+                "primary-container": "#10b981",
+                "surface-variant": "#e0e3e5",
+                "primary-fixed": "#6ffbbe",
+                "outline": "#6c7a71",
+                "inverse-on-surface": "#eff1f3",
+                "surface-muted": "#64748B",
+                "primary": "#006c49",
+                "surface-container-lowest": "#ffffff",
+                "background": "#f7f9fb",
+                "tertiary-container": "#f08921",
+                "on-tertiary": "#ffffff",
+                "data-blue": "#0284C7",
+                "surface-border": "#E2E8F0",
+                "surface-container-highest": "#e0e3e5",
+                "surface": "#f7f9fb",
+                "tertiary-fixed-dim": "#ffb77d",
+                "secondary": "#ba0035",
+                "inverse-surface": "#2d3133",
+                "surface-dim": "#d8dadc",
+                "surface-bright": "#f7f9fb",
+                "on-tertiary-fixed-variant": "#6e3900",
+                "surface-container-high": "#e6e8ea",
+                "on-tertiary-container": "#5a2e00",
+                "on-background": "#191c1e",
+                "error": "#ba1a1a",
+                "surface-tint": "#006c49",
+                "error-container": "#ffdad6",
+                "on-surface-variant": "#3c4a42",
+                "on-primary": "#ffffff",
+                "on-error-container": "#93000a",
+                "on-secondary-container": "#fffbff",
+                "outline-variant": "#bbcabf",
+                "on-tertiary-fixed": "#2f1500",
+                "status-amber": "#D97706",
+                "on-secondary": "#ffffff",
+                "secondary-container": "#e21e49",
+                "primary-fixed-dim": "#4edea3",
+                "on-secondary-fixed-variant": "#920028",
+                "on-surface": "#191c1e",
+                "inverse-primary": "#4edea3",
+                "on-primary-fixed": "#002113",
+                "on-error": "#ffffff",
+                "on-primary-container": "#00422b",
+                "tertiary-fixed": "#ffdcc3",
+                "tertiary": "#904d00",
+                "secondary-fixed-dim": "#ffb3b6",
+                "surface-container": "#eceef0",
+                "on-primary-fixed-variant": "#005236",
+                "on-secondary-fixed": "#40000c",
+                "secondary-fixed": "#ffdada"
+        },
+        "borderRadius": {
+                "DEFAULT": "0.125rem",
+                "lg": "0.25rem",
+                "xl": "0.5rem",
+                "full": "0.75rem"
+        },
+        "spacing": {
+                "margin": "24px",
+                "unit": "4px",
+                "container-max": "1440px",
+                "gutter": "16px"
+        },
+        "fontFamily": {
+                "data-mono": [
+                        "JetBrains Mono"
+                ],
+                "headline-md": [
+                        "Hanken Grotesk"
+                ],
+                "label-caps": [
+                        "JetBrains Mono"
+                ],
+                "display-lg-mobile": [
+                        "Hanken Grotesk"
+                ],
+                "display-lg": [
+                        "Hanken Grotesk"
+                ],
+                "body-md": [
+                        "Hanken Grotesk"
+                ]
+        },
+        "fontSize": {
+                "data-mono": [
+                        "14px",
+                        {
+                                "lineHeight": "20px",
+                                "fontWeight": "500"
+                        }
+                ],
+                "headline-md": [
+                        "24px",
+                        {
+                                "lineHeight": "32px",
+                                "fontWeight": "600"
+                        }
+                ],
+                "label-caps": [
+                        "11px",
+                        {
+                                "lineHeight": "16px",
+                                "letterSpacing": "0.08em",
+                                "fontWeight": "700"
+                        }
+                ],
+                "display-lg-mobile": [
+                        "24px",
+                        {
+                                "lineHeight": "32px",
+                                "letterSpacing": "-0.02em",
+                                "fontWeight": "700"
+                        }
+                ],
+                "display-lg": [
+                        "32px",
+                        {
+                                "lineHeight": "40px",
+                                "letterSpacing": "-0.02em",
+                                "fontWeight": "700"
+                        }
+                ],
+                "body-md": [
+                        "16px",
+                        {
+                                "lineHeight": "24px",
+                                "fontWeight": "400"
+                        }
+                ]
+        }
+},
+    },
+  }
+</script>
+<style>
+        .cyber-border { border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); }
+        .cyber-border-active { border: 1px solid #10b981; }
+        .status-dot-emerald { background-color: #10B981; box-shadow: 0 0 10px #10B981; }
+        .status-dot-amber { background-color: #D97706; box-shadow: 0 0 10px #D97706; }
+        .status-dot-ruby { background-color: #E11D48; box-shadow: 0 0 10px #E11D48; }
+        .progress-bar-bg { background-color: rgba(236, 238, 240, 0.5); }
+        .progress-bar-fill { background-color: #10b981; box-shadow: 0 0 8px rgba(16,185,129,0.5); }
+        .progress-bar-fill-warn { background-color: #f08921; box-shadow: 0 0 8px rgba(240,137,33,0.5); }
+        .btn-kill { background-color: #ba1a1a; color: #ffffff; transition: all 0.2s; border: 1px solid #93000a; }
+        .btn-kill:hover { background-color: #93000a; color: #ffffff; transform: scale(0.98); box-shadow: 0 0 15px rgba(186,26,26,0.6); }
+        .glass-panel { background-color: rgba(255, 255, 255, 0.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    </style>
+<!-- TopNavBar -->
+<!-- Main Content Canvas -->
+<main class="flex-1 overflow-y-auto p-margin w-full">
+<header class="mb-6 flex justify-between items-end border-b border-surface-border/50 pb-4">
+<div>
+<h2 class="font-headline-md text-headline-md text-on-surface">KVM Node Registry</h2>
+<p class="font-data-mono text-data-mono text-on-surface-variant mt-1 text-xs">Total Active Hosts: 24 | Capacity: 82%</p>
+</div>
+<div class="flex gap-2"><button class="bg-primary-container text-on-primary-container font-label-caps text-label-caps px-4 py-1.5 rounded-xl hover:opacity-90 transition-colors flex items-center gap-1 shadow-sm"><span class="material-symbols-outlined text-sm">add_circle</span> Deploy Node</button><button class="bg-tertiary-container text-on-tertiary-container font-label-caps text-label-caps px-4 py-1.5 rounded-xl hover:opacity-90 transition-colors flex items-center gap-1 shadow-sm"><span class="material-symbols-outlined text-sm">hub</span> Deploy Control Plane node</button><button class="glass-panel cyber-border text-on-surface font-label-caps text-label-caps px-3 py-1.5 rounded-xl hover:border-primary-container/50 transition-colors flex items-center gap-1 ml-2"><span class="material-symbols-outlined text-sm">filter_list</span> Filter</button><button class="glass-panel cyber-border text-on-surface font-label-caps text-label-caps px-3 py-1.5 rounded-xl hover:border-primary-container/50 transition-colors flex items-center gap-1"><span class="material-symbols-outlined text-sm">sort</span> Sort</button></div>
+</header>
+<!-- Node Grid -->
+<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+<!-- Node Card 1: Healthy -->
+<article class="glass-panel rounded-2xl p-5 flex flex-col gap-4 cyber-border hover:border-primary-container/50 transition-colors group relative overflow-hidden">
+<div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-primary-container/20 to-transparent pointer-events-none rounded-bl-3xl"></div>
+<header class="flex justify-between items-start">
+<div class="flex items-center gap-3">
+<div class="w-12 h-12 rounded-xl bg-white/50 backdrop-blur-sm cyber-border flex items-center justify-center">
+<span class="material-symbols-outlined text-primary-container drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" data-icon="dns">dns</span>
+</div>
+<div>
+<h3 class="font-data-mono text-data-mono text-on-surface font-bold group-hover:text-primary-container transition-colors">kvm-node-01</h3>
+<span class="font-label-caps text-[9px] text-on-surface-variant uppercase flex items-center gap-1 mt-1">
+<span class="w-2 h-2 rounded-full status-dot-emerald inline-block"></span>
+                                Kubelet: Ready
+                            </span>
+</div>
+</div>
+<span class="font-data-mono text-[10px] text-on-surface-variant bg-white/50 backdrop-blur-sm px-2.5 py-1 rounded-lg cyber-border">Up 45d 12h</span>
+</header>
+<div class="font-data-mono text-data-mono text-xs space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">CPU</span><span class="text-primary-container font-bold drop-shadow-[0_0_4px_rgba(16,185,129,0.3)]">45%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(16,185,129,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,80 L20,60 L40,70 L60,40 L80,50 L100,30" fill="none" stroke="#10b981" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">RAM</span><span class="text-primary-container font-bold drop-shadow-[0_0_4px_rgba(16,185,129,0.3)]">62%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(16,185,129,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,70 L25,75 L50,60 L75,65 L100,40" fill="none" stroke="#10b981" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div></div></div>
+<div class="mt-auto pt-4 border-t border-surface-border/50 flex justify-end">
+<button class="btn-kill font-label-caps text-label-caps px-4 py-1.5 rounded-xl flex items-center gap-2 uppercase tracking-widest text-[10px] font-bold shadow-sm">
+<span class="material-symbols-outlined text-sm" data-icon="power_settings_new">power_settings_new</span>
+                        Terminate
+                    </button>
+</div>
+</article>
+<!-- Node Card 2: Warning -->
+<article class="glass-panel rounded-2xl p-5 flex flex-col gap-4 cyber-border hover:border-tertiary-container/50 transition-colors group relative overflow-hidden">
+<header class="flex justify-between items-start">
+<div class="flex items-center gap-3">
+<div class="w-12 h-12 rounded-xl bg-white/50 backdrop-blur-sm cyber-border flex items-center justify-center">
+<span class="material-symbols-outlined text-tertiary-container drop-shadow-[0_0_8px_rgba(240,137,33,0.5)]" data-icon="dns">dns</span>
+</div>
+<div>
+<h3 class="font-data-mono text-data-mono text-on-surface font-bold group-hover:text-tertiary-container transition-colors">kvm-node-02</h3>
+<span class="font-label-caps text-[9px] text-on-surface-variant uppercase flex items-center gap-1 mt-1">
+<span class="w-2 h-2 rounded-full status-dot-amber inline-block"></span>
+                                Kubelet: SchedulingDisabled
+                            </span>
+</div>
+</div>
+<span class="font-data-mono text-[10px] text-on-surface-variant bg-white/50 backdrop-blur-sm px-2.5 py-1 rounded-lg cyber-border">Up 12d 4h</span>
+</header>
+<div class="font-data-mono text-data-mono text-xs space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">CPU</span><span class="text-tertiary-container font-bold drop-shadow-[0_0_4px_rgba(240,137,33,0.3)]">88%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(240,137,33,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,90 L20,85 L40,95 L60,70 L80,80 L100,90" fill="none" stroke="#f08921" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">RAM</span><span class="text-primary-container font-bold drop-shadow-[0_0_4px_rgba(16,185,129,0.3)]">40%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(16,185,129,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,60 L25,55 L50,65 L75,50 L100,60" fill="none" stroke="#10b981" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div></div></div>
+<div class="mt-auto pt-4 border-t border-surface-border/50 flex justify-end">
+<button class="btn-kill font-label-caps text-label-caps px-4 py-1.5 rounded-xl flex items-center gap-2 uppercase tracking-widest text-[10px] font-bold shadow-sm">
+<span class="material-symbols-outlined text-sm" data-icon="power_settings_new">power_settings_new</span>
+                        Terminate
+                    </button>
+</div>
+</article>
+<!-- Node Card 3: Error -->
+<article class="glass-panel rounded-2xl p-5 flex flex-col gap-4 border border-error/30 hover:border-error/60 transition-colors group relative overflow-hidden shadow-sm">
+<div class="absolute inset-0 bg-gradient-to-br from-error/5 to-transparent pointer-events-none"></div>
+<header class="flex justify-between items-start relative z-10">
+<div class="flex items-center gap-3">
+<div class="w-12 h-12 rounded-xl bg-white/50 backdrop-blur-sm border border-error/30 flex items-center justify-center">
+<span class="material-symbols-outlined text-error drop-shadow-[0_0_8px_rgba(186,26,26,0.6)]" data-icon="dns">dns</span>
+</div>
+<div>
+<h3 class="font-data-mono text-data-mono text-error font-bold drop-shadow-[0_0_2px_rgba(186,26,26,0.2)]">kvm-node-03</h3>
+<span class="font-label-caps text-[9px] text-error uppercase flex items-center gap-1 mt-1">
+<span class="w-2 h-2 rounded-full status-dot-ruby inline-block"></span>
+                                Kubelet: NotReady
+                            </span>
+</div>
+</div>
+<span class="font-data-mono text-[10px] text-error bg-error-container/40 backdrop-blur-sm px-2.5 py-1 rounded-lg border border-error/30 whitespace-nowrap">Up 2h 15m</span>
+</header>
+<div class="font-data-mono text-data-mono text-xs relative z-10 space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">CPU</span><span class="text-error font-bold drop-shadow-[0_0_4px_rgba(186,26,26,0.3)]">99%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(186,26,26,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,95 L20,98 L40,92 L60,99 L80,95 L100,98" fill="none" stroke="#ba1a1a" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div><div><div class="flex justify-between mb-1"><span class="text-on-surface-variant">RAM</span><span class="text-error font-bold drop-shadow-[0_0_4px_rgba(186,26,26,0.3)]">95%</span></div><div class="h-8 w-full bg-surface-container-low/50 backdrop-blur-sm rounded-lg overflow-hidden relative cyber-border"><svg class="absolute inset-0 w-full h-full drop-shadow-[0_2px_4px_rgba(186,26,26,0.5)]" preserveaspectratio="none" viewbox="0 0 100 100"><path d="M0,90 L25,95 L50,88 L75,92 L100,95" fill="none" stroke="#ba1a1a" stroke-width="2"></path></svg></div><div class="flex justify-between text-[8px] text-outline mt-0.5 px-1 font-data-mono"><span class="">-15m</span><span class="">Now</span></div></div></div></div>
+<div class="mt-auto pt-4 border-t border-error/20 flex justify-end relative z-10">
+<button class="btn-kill font-label-caps text-label-caps px-4 py-1.5 rounded-xl flex items-center gap-2 uppercase tracking-widest text-[10px] font-bold shadow-sm">
+<span class="material-symbols-outlined text-sm" data-icon="bomb">warning</span>
+                        Kill Node
+                    </button>
+</div>
+</article>
+</div>
+<!-- Network Traffic Analysis Section -->
+<section class="mt-8">
+<header class="mb-4 pb-2 border-b border-surface-border/50">
+<h2 class="font-headline-md text-headline-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-primary-container drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]">monitoring</span>
+            Network Traffic Analysis
+        </h2>
+<p class="font-data-mono text-data-mono text-on-surface-variant mt-1 text-xs">Real-time ingress and inter-node bandwidth utilization</p>
+</header>
+<div class="glass-panel rounded-2xl p-6 cyber-border">
+<div class="flex justify-between items-center mb-6">
+<div class="flex gap-4">
+<div class="flex items-center gap-2">
+<span class="w-3 h-3 rounded-md bg-primary-container shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
+<span class="font-data-mono text-xs text-on-surface-variant">Ingress Traffic</span>
+</div>
+<div class="flex items-center gap-2">
+<span class="w-3 h-3 rounded-md bg-error shadow-[0_0_8px_rgba(186,26,26,0.5)]"></span>
+<span class="font-data-mono text-xs text-on-surface-variant">Dropped Packets</span>
+</div>
+<div class="flex items-center gap-2"><span class="w-3 h-3 rounded-md bg-tertiary-container shadow-[0_0_8px_rgba(240,137,33,0.5)]"></span><span class="font-data-mono text-xs text-on-surface-variant">Inter-cluster Traffic</span></div></div>
+<div class="font-data-mono text-xs bg-white/50 backdrop-blur-sm px-3 py-1.5 rounded-lg cyber-border text-primary-container font-bold drop-shadow-[0_0_2px_rgba(16,185,129,0.3)]">
+                Peak: 4.2 Gbps
+            </div>
+</div>
+<!-- Mock Line Graph -->
+<div class="relative w-full h-48 border-l border-b border-surface-border/50 flex items-end">
+<!-- Y-Axis Labels -->
+<div class="absolute -left-10 top-0 h-full flex flex-col justify-between font-data-mono text-[10px] text-outline/70 text-right w-8">
+<span class="">5G</span>
+<span class="">4G</span>
+<span class="">3G</span>
+<span class="">2G</span>
+<span class="">1G</span>
+<span class="">0</span>
+</div>
+<!-- X-Axis Labels -->
+<div class="absolute -bottom-6 left-0 w-full flex justify-between font-data-mono text-[10px] text-outline/70 px-2">
+<span class="">10:00</span>
+<span class="">10:05</span>
+<span class="">10:10</span>
+<span class="">10:15</span>
+<span class="">10:20</span>
+<span class="">Now</span>
+</div>
+<!-- Grid Lines -->
+<div class="absolute inset-0 flex flex-col justify-between pointer-events-none">
+<div class="w-full h-px bg-surface-border/30"></div>
+<div class="w-full h-px bg-surface-border/30"></div>
+<div class="w-full h-px bg-surface-border/30"></div>
+<div class="w-full h-px bg-surface-border/30"></div>
+<div class="w-full h-px bg-surface-border/30"></div>
+</div>
+<!-- Ingress Line (Primary / Emerald) -->
+<svg class="absolute inset-0 w-full h-full overflow-visible drop-shadow-[0_4px_8px_rgba(16,185,129,0.4)]" preserveaspectratio="none" viewbox="0 0 100 100">
+<defs>
+<lineargradient id="gradient-primary" x1="0" x2="0" y1="0" y2="1">
+<stop offset="0%" stop-color="#10b981" stop-opacity="0.25"></stop>
+<stop offset="100%" stop-color="#10b981" stop-opacity="0"></stop>
+</lineargradient>
+</defs>
+<path class="text-primary-container" d="M0,80 Q10,70 20,75 T40,60 T60,40 T80,50 T100,20" fill="none" stroke="currentColor" stroke-width="2.5"></path>
+<path d="M0,80 Q10,70 20,75 T40,60 T60,40 T80,50 T100,20 L100,100 L0,100 Z" fill="url(#gradient-primary)"></path>
+</svg>
+<!-- Dropped Line (Error / Ruby) -->
+<svg class="absolute inset-0 w-full h-full overflow-visible drop-shadow-[0_2px_6px_rgba(186,26,26,0.3)]" preserveaspectratio="none" viewbox="0 0 100 100">
+    <path class="text-error" d="M0,95 Q20,98 40,90 T70,85 T100,92" fill="none" stroke="currentColor" stroke-dasharray="2,2" stroke-width="2"></path>
+</svg><svg class="absolute inset-0 w-full h-full overflow-visible drop-shadow-[0_2px_6px_rgba(240,137,33,0.3)]" preserveaspectratio="none" viewbox="0 0 100 100"><path class="text-tertiary-container" d="M0,60 Q25,40 50,55 T100,30" fill="none" opacity="0.9" stroke="currentColor" stroke-width="2"></path></svg>
+</div>
+</div>
+</section>
+</main>
+</body></html>
