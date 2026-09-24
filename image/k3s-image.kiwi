@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<image schemaversion="8.4" name="k3s-image">
+    <description type="system">
+        <author>Dan Čermák</author>
+        <contact>dcermak@suse.com</contact>
+        <specification>k3s image</specification>
+    </description>
+    <preferences>
+        <version>1.42.1</version>
+        <packagemanager>zypper</packagemanager>
+        <locale>en_US</locale>
+        <keytable>us</keytable>
+        <timezone>Europe/Prague</timezone>
+        <rpm-excludedocs>true</rpm-excludedocs>
+        <bootloader-theme>openSUSE</bootloader-theme>
+        <type image="oem" format="qcow2" filesystem="btrfs" bootpartition="false" kernelcmdline="console=ttyS0" firmware="uefi" devicepersistency="by-uuid" btrfs_root_is_subvolume="true" btrfs_quota_groups="true" btrfs_root_is_snapper_snapshot="true">
+            <size unit="G" additive="true">20</size>
+            <bootloader name="grub2" timeout="0" output_console="serial"/>
+            <systemdisk>
+                <volume name="home"/>
+                <volume name="root"/>
+                <volume name="opt"/>
+                <volume name="srv"/>
+                <volume name="boot/grub2/i386-pc"/>
+                <volume name="boot/grub2/x86_64-efi" mountpoint="boot/grub2/x86_64-efi"/>
+                <volume name="boot/writable"/>
+                <volume name="usr/local"/>
+                <volume name="var" copy_on_write="false"/>
+            </systemdisk>
+        </type>
+    </preferences>
+    <users>
+        <user password="$1$wYJUgpM5$RXMMeASDc035eX.NbYWFl0" home="/root" name="root" groups="root"/>
+        <!-- <user password="$1$wYJUgpM5$RXMMeASDc035eX.NbYWFl0" home="/home/test-user" name="test-user" groups="users"/> -->
+    </users>
+    <repository type="rpm-md" alias="kubic" imageinclude="true" priority="1">
+        <source path="obs://devel:kubic/openSUSE_Tumbleweed"/>
+    </repository>
+    <repository type="rpm-md" alias="OS" imageinclude="true">
+        <source path="obs://openSUSE:Factory/snapshot"/>
+    </repository>
+    <packages type="image">
+        <package name="patterns-openSUSE-base"/>
+        <package name="procps"/>
+        <package name="systemd"/>
+        <package name="grub2-branding-openSUSE"/>
+        <package name="iputils"/>
+        <package name="vim"/>
+        <package name="grub2"/>
+        <package name="grub2-x86_64-efi" arch="x86_64"/>
+        <package name="grub2-i386-pc"/>
+        <package name="lvm2"/>
+        <package name="tar"/>
+        <package name="parted"/>
+        <package name="openssh"/>
+        <package name="iproute2"/>
+        <package name="less"/>
+        <package name="bash-completion"/>
+        <package name="bind-utils"/>
+        <package name="dhcp-client"/>
+        <package name="which"/>
+        <package name="kernel-default"/>
+        <package name="timezone"/>
+        <package name="dracut-kiwi-oem-repart"/>
+        <package name="dracut-kiwi-oem-dump"/>
+        <package name="snapper"/>
+        <package name="NetworkManager"/>
+        <package name="systemd-resolved"/>
+        <package name="live-add-yast-repos"/>
+        <!-- relevant packages for the demo image -->
+        <package name="k3s"/>
+        <package name="qemu-guest-agent"/>
+        <file name="k3s-demo-guest"
+              target="/usr/local/libexec/k3s-demo-guest"
+              owner="root:root"
+              permissions="0755"/>
+        <file name="k3s-demo-prepare.service"
+              target="/etc/systemd/system/k3s-demo-prepare.service"
+              owner="root:root"
+              permissions="0644"/>
+        <file name="k3s-node.service"
+              target="/etc/systemd/system/k3s-node.service"
+              owner="root:root"
+              permissions="0644"/>
+        <file name="qemu-ga"
+              target="/etc/sysconfig/qemu-ga"
+              owner="root:root"
+              permissions="0644"/>
+    </packages>
+    <packages type="bootstrap">
+        <package name="gawk"/>
+        <package name="grep"/>
+        <package name="gzip"/>
+        <package name="udev"/>
+        <package name="xz"/>
+        <package name="diffutils"/>
+        <package name="shadow"/>
+        <package name="filesystem"/>
+        <package name="glibc-locale"/>
+        <package name="cracklib-dict-full"/>
+        <package name="ca-certificates"/>
+        <package name="ca-certificates-mozilla"/>
+        <package name="openSUSE-release-appliance-kvm"/>
+        <package name="dracut"/>
+    </packages>
+</image>

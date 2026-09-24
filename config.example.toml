@@ -13,7 +13,8 @@ port = 8000
 allowed_hosts = ["127.0.0.1:8000", "localhost:8000"]
 # Must be absolute. Use the same path for service and manual launches, regardless
 # of the working directory or XDG_RUNTIME_DIR. The parent directory must
-# already exist and be writable by the dashboard account. See Readme.md.
+# already exist and be writable by the dashboard account. init-pool does not
+# create it; use the service RuntimeDirectory or the manual setup in Readme.md.
 lock_path = "/run/k3s-kvm-demo/dashboard.lock"
 
 [libvirt]
@@ -39,9 +40,9 @@ network = "default"
 # directory, not from this configuration file's directory.
 base_image = "/var/lib/libvirt/images/k3s-base-v2.qcow2"
 # Overlay capacity. Must be at least the base image's virtual size.
-disk_gb = 20
-memory_mb = 2048
-vcpus = 2
+disk_gb = 24
+memory_mb = 4096
+vcpus = 4
 # Node names are "<name_prefix>-<32 hex>"; the hex is the domain UUID.
 name_prefix = "k3s-node"
 # A hard ceiling so a visitor cannot exhaust the booth machine.
