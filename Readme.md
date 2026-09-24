@@ -158,6 +158,10 @@ uv run k3s-demo serve
 
 Then point a kiosk browser at `http://127.0.0.1:8000/`.
 
+`init-pool` only creates the libvirt storage pool. It does not create the lock
+directory. `check` and `serve` both require the configured lock directory to
+exist and be writable by the account that runs them.
+
 The CLI selects configuration in this order: `--config`, `K3S_DEMO_CONFIG`, then `config.toml` in the current directory.
 Place the option before the subcommand, for example `uv run k3s-demo --config /etc/k3s-kvm-demo/config.toml check`.
 A relative `vm.base_image` resolves from the process's working directory, not the configuration file's directory.
@@ -302,6 +306,8 @@ Do not run simultaneous instances with different lock paths.
 Manual launches need a precreated writable directory, as shown in Setup, or an administrator-managed `systemd-tmpfiles` rule.
 Because `/run` is temporary, manual directory setup must survive or be repeated after a reboot.
 The application does not change directory ownership or host security policy automatically.
+`init-pool` does not create the runtime directory; `check` reports an unusable
+lock path before the dashboard starts.
 No lock-path environment variable is needed.
 
 The unit retains `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,

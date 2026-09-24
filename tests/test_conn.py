@@ -236,6 +236,13 @@ def test_singleton_lock_records_the_pid(tmp_path):
         assert path.read_text().strip() == str(os.getpid())
 
 
+def test_singleton_lock_does_not_create_a_missing_parent(tmp_path):
+    path = tmp_path / "missing" / "demo.lock"
+    with pytest.raises(FileNotFoundError):
+        SingletonLock(path).acquire()
+    assert not path.parent.exists()
+
+
 def test_acquiring_twice_in_one_process_is_harmless(tmp_path):
     lock = SingletonLock(tmp_path / "demo.lock")
     lock.acquire()

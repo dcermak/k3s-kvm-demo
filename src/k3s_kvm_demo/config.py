@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import shutil
+import stat
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -194,6 +196,63 @@ def _load_server(section: dict) -> ServerConfig:
             "server.lock_path", "must be an absolute path shared by all launch methods"
         )
     return ServerConfig(bind=bind, port=port, allowed_hosts=hosts, lock_path=Path(lock_path))
+
+
+def validate_lock_path(lock_path: Path) -> None:
+    """Check that the current account can create and use the server lock.
+
+    The runtime-directory owner, rather than this application, creates the
+    parent.  For example, systemd's ``RuntimeDirectory=`` creates it for the
+    service account.  This check deliberately does not acquire the lock: a
+    running dashboard is not a configuration error.
+    """
+    parent = lock_path.parent
+    try:
+        parent_stat = parent.stat()
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            "server.lock_path",
+            f"parent directory {parent} does not exist; create it for the account that runs "
+            "the dashboard",
+        ) from exc
+    except OSError as exc:
+        raise ConfigError(
+            "server.lock_path", f"cannot access parent directory {parent}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ConfigError("server.lock_path", f"parent path {parent} is not a directory")
+    try:
+        parent_usable = os.access(parent, os.W_OK | os.X_OK, effective_ids=True)
+    except OSError as exc:
+        raise ConfigError(
+            "server.lock_path", f"cannot access parent directory {parent}: {exc}"
+        ) from exc
+    if not parent_usable:
+        raise ConfigError(
+            "server.lock_path",
+            f"parent directory {parent} is not writable and searchable by this account",
+        )
+    try:
+        lock_stat = lock_path.stat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ConfigError(
+            "server.lock_path", f"cannot access lock path {lock_path}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(lock_stat.st_mode):
+        raise ConfigError("server.lock_path", f"lock path {lock_path} is not a regular file")
+    try:
+        lock_usable = os.access(lock_path, os.R_OK | os.W_OK, effective_ids=True)
+    except OSError as exc:
+        raise ConfigError(
+            "server.lock_path", f"cannot access lock path {lock_path}: {exc}"
+        ) from exc
+    if not lock_usable:
+        raise ConfigError(
+            "server.lock_path",
+            f"lock path {lock_path} is not readable and writable by this account",
+        )
 
 
 def _load_libvirt(section: dict) -> LibvirtConfig:

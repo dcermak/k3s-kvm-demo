@@ -83,12 +83,16 @@ def cmd_init_pool(cfg: configmod.Config, path: str | None) -> int:
 
 
 def cmd_check(cfg: configmod.Config) -> int:
-    print(f"configuration at {cfg.source} parses cleanly")
+    try:
+        configmod.validate_lock_path(cfg.server.lock_path)
+    except configmod.ConfigError as exc:
+        return _fail(exc, 1)
     with _connect(cfg) as conn:
         try:
             warnings = configmod.validate_hypervisor(conn, cfg)
         except configmod.ConfigError as exc:
             return _fail(exc, 1)
+    print(f"configuration at {cfg.source} parses cleanly")
     for warning in warnings:
         print(f"warning: {warning}")
     print("hypervisor prerequisites are satisfied")
@@ -125,6 +129,7 @@ def cmd_serve(cfg: configmod.Config) -> int:
 
     from .app import build_state, create_app
 
+    configmod.validate_lock_path(cfg.server.lock_path)
     with _connect(cfg) as conn:
         for warning in configmod.validate_hypervisor(conn, cfg):
             log.warning("%s", warning)
