@@ -274,25 +274,6 @@ def test_prune_without_a_server_explains_itself(client):
     assert "no running, configured control plane node" in response.text
 
 
-def test_healthz_reports_what_an_operator_needs(client, manager, observer):
-    client.post("/deploy/server")
-    observe(observer)
-    payload = client.get("/healthz").json()
-
-    assert payload["nodes"] == 1
-    assert payload["states"] == [meta.CONFIGURED]
-    assert payload["pool_marker"] is True
-    assert payload["unclassified_volumes"] == []
-    assert payload["orphan_candidates"] == []
-    assert "in_flight" not in payload
-    assert "queue_load" not in payload
-
-
-def test_healthz_surfaces_orphan_candidates(client, conn):
-    add_volume(conn, ORPHAN)
-    assert client.get("/healthz").json()["orphan_candidates"] == [ORPHAN]
-
-
 def test_observation_and_reset_never_reap_unclaimed_volumes(client, observer, manager, conn):
     add_volume(conn, ORPHAN)
     observe(observer)

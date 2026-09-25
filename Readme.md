@@ -413,9 +413,6 @@ If changing the golden image too, extract it to a new path and update both the c
 Existing overlays retain their original backing image, so keep old base files until their VMs are removed.
 To roll back, stop the service and restore a compatible previous container image and configuration without deleting VM storage.
 
-`GET /healthz` reports the connection, node count, in-flight work, whether the
-pool marker is present, and any unclassified or orphaned volumes.
-
 ## Development
 
 For native development, install Python build and runtime tools on your development host:

@@ -55,7 +55,7 @@ def test_a_same_origin_post_is_allowed(client):
 
 
 def test_reads_are_not_gated(client):
-    for path in ("/", "/nodes", "/healthz", "/static/app.css"):
+    for path in ("/", "/nodes", "/static/app.css"):
         assert client.get(path, headers={"Origin": "https://evil.example"}).status_code == 200
 
 
@@ -99,7 +99,7 @@ def test_the_token_never_appears_in_any_response(client, cfg, agent, observer, e
     client.post("/deploy/server")
     observe(observer)
 
-    for path in ("/", "/nodes", "/healthz"):
+    for path in ("/", "/nodes"):
         assert cfg.cluster.token not in client.get(path).text, path
 
 

@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import libvirt
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -296,31 +296,5 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
         for name, reason in result.failed:
             state.flashes.add("error", f"{name}: {reason}")
         return render(request, state, nodes=nodes)
-
-    @app.get("/healthz")
-    def healthz(state: AppState = Depends(get_state)) -> JSONResponse:
-        payload: dict[str, object] = {
-            "uri": state.cfg.libvirt.uri,
-            "connection_epoch": state.cm.epoch,
-            "observation_stale_after_s": state.cfg.observation.stale_after_s,
-        }
-        try:
-            # Metadata only: the counts here do not need power state or an
-            # address for every node.
-            states = state.manager.states()
-            payload["nodes"] = len(states)
-            payload["states"] = sorted(set(states))
-        except libvirt.libvirtError as exc:
-            payload["error"] = str(exc)
-            return JSONResponse(payload, status_code=503)
-
-        try:
-            status = state.manager.pool_status()
-            payload["pool_marker"] = status.marker
-            payload["unclassified_volumes"] = list(status.unknown)
-            payload["orphan_candidates"] = sorted(state.manager.unclaimed_volumes(status))
-        except (libvirt.libvirtError, poolmod.PoolError) as exc:
-            payload["pool_error"] = str(exc)
-        return JSONResponse(payload)
 
     return app

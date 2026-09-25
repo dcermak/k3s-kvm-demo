@@ -39,7 +39,7 @@ def test_stdout_export_coexists_with_dashboard_without_mutations(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert yaml.safe_load(captured.out) == expected_document(candidate_cluster)
-    assert client.get("/healthz").status_code == 200
+    assert client.get("/nodes").status_code == 200
     assert_guest_read(export_agent, candidate_cluster)
     assert inventory(conn) == before
     assert SECRET not in caplog.text
