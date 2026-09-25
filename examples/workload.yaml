@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-demo
+  template:
+    metadata:
+      labels:
+        app: worker-demo
+    spec:
+      nodeSelector:
+        k3s-demo-workload: "true"
+      # Shorten eviction after node failure detection for the booth demo.
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+      containers:
+        - name: nginx
+          image: registry.opensuse.org/opensuse/nginx:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80

@@ -3,32 +3,24 @@
 # Copy to config.toml and edit. Validate with:  uv run k3s-demo check
 
 [server]
-# Must be a loopback address. This API destroys VMs and runs root commands
-# inside guests with no authentication; listening off-host is refused, not
-# merely warned about.
+# Loopback only: the unauthenticated API controls VMs and runs guest root commands.
 bind = "127.0.0.1"
 port = 8000
-# Host headers the dashboard will accept mutating requests from. Loopback
-# binding alone does not stop a page on another origin POSTing here.
+# Accepted hosts for mutating requests; cross-origin requests are rejected.
 allowed_hosts = ["127.0.0.1:8000", "localhost:8000"]
 
 [libvirt]
 uri = "qemu:///system"
-# A pool used by nothing else. Create it with:  uv run k3s-demo init-pool
-# Startup refuses to run unless the pool contains the marker volume that
-# command writes, and refuses again if it finds a volume it cannot account
-# for: the app deletes seed disks and overlays in here.
+# Dedicated pool. init-pool creates its ownership marker.
+# Startup rejects missing ownership or unrecognized volumes.
 pool = "k3s-demo"
 network = "default"
 
 [vm]
-# Build the guest using image/k3s-image.kiwi and the boxbuild plugin.
-# The Containerfile bundles repository-root k3s-image.qcow2. Extract it to the
-# host before starting the dashboard; see Readme.md for the Podman commands.
-# The base must be standalone qcow2, with no backing file of its own.
-# Keep it OUTSIDE the demo pool. Never overwrite an existing backing image.
-# Use an absolute host path and mount it at the identical container path.
-# Update the base-image Volume= line in contrib/k3s-demo.container to match.
+# The deployment script extracts the bundled image here. For custom paths,
+# see docs/operations.md; for image builds, see image/Readme.md.
+# Standalone qcow2, outside the demo pool. Never overwrite a backing image.
+# Use an absolute path matching both sides of the Quadlet's Volume= line.
 base_image = "/var/lib/libvirt/images/k3s-base-v2.qcow2"
 # Overlay capacity. Must be at least the base image's virtual size.
 disk_gb = 24
@@ -42,8 +34,7 @@ max_nodes = 8
 [cluster]
 # Pre-shared join secret, used by every node. Change it.
 token = "booth-demo-please-change-me"
-# Extra Subject Alternative Names for the control plane certificate, e.g. a
-# fixed VIP you want kubectl to reach the cluster through.
+# Extra certificate Subject Alternative Names, such as a fixed virtual IP.
 tls_san = []
 
 [observation]
@@ -63,7 +54,5 @@ path = "/run/k3s-kvm-demo/kubeconfig.yaml"
 interval_s = 1
 
 [maintenance]
-# How long shutdown waits for in-flight guest-agent calls before giving up and
-# exiting anyway. The libvirt connection is left open if a worker is still in
-# it, rather than closing a connection still in use.
+# Shutdown wait for guest-agent calls. Connections still in use remain open.
 shutdown_grace_s = 30
