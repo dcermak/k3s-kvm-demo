@@ -1,12 +1,12 @@
 [Unit]
 Description=k3s KVM demo dashboard
-Documentation=https://github.com/SUSE-Rancher-Community/k3s-kvm-demo
+Documentation=https://github.com/dcermak/k3s-kvm-demo
 # MicroOS with modular libvirt. For monolithic libvirt use libvirtd.socket.
 Wants=virtqemud.socket virtstoraged.socket virtnetworkd.socket
 After=virtqemud.socket virtstoraged.socket virtnetworkd.socket systemd-tmpfiles-setup.service
 
 [Container]
-Image=localhost/k3s-kvm-demo:latest
+Image=ghcr.io/dcermak/k3s-kvm-demo:latest
 ContainerName=k3s-demo
 User=0
 Network=host
