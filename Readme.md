@@ -100,6 +100,25 @@ Guest preparation continues if the dashboard or QGA becomes unavailable.
 
 ## Setup
 
+### Deploying on MicroOS
+
+On a host with libvirt, KVM, Podman, and the `default` DHCP network ready, run
+from the repository root:
+
+```bash
+cp config.example.toml config.toml
+chmod 0600 config.toml
+"${EDITOR:-vi}" config.toml
+./scripts/deploy.sh
+```
+
+Set `cluster.token` to a private token and adjust the VM resources as needed.
+
+The script uses `Image=` from `contrib/k3s-demo.container`. The script installs
+the configuration and tmpfiles rule, extracts the golden image if absent,
+initializes the pool, runs `check`, and installs and starts the container via
+quadlet.
+
 ### Building the container
 
 Run from the repository root after placing the KIWI output at `k3s-image.qcow2`:
@@ -137,11 +156,9 @@ In `dcermak/k3s-kvm-demo`, main pushes and scheduled runs publish these containe
 Pull requests build without publishing. Publication uses the repository's `GITHUB_TOKEN` with `packages: write` permission.
 After the first push, set the GHCR package visibility to public in its package settings.
 
-To use the published container, pull it and set `IMAGE` and the Quadlet's `Image=` to the same reference:
-
-```bash
-sudo podman pull ghcr.io/dcermak/k3s-kvm-demo:latest
-```
+The deployment script and Quadlet use the published container. For the manual
+commands below, set `IMAGE` and the Quadlet's `Image=` to the same reference.
+Podman downloads a missing image when creating or running the container.
 
 The guest image retains its fixed demo credentials and enables SSH. Use it only for demos, not production.
 
@@ -152,7 +169,7 @@ Extract it once into host storage, outside the demo pool.
 These commands use the example base path; choose a new filename if it already exists.
 
 ```bash
-IMAGE=localhost/k3s-kvm-demo:latest
+IMAGE=ghcr.io/dcermak/k3s-kvm-demo:latest
 BASE=/var/lib/libvirt/images/k3s-base-v2.qcow2
 sudo podman create --name k3s-image-extract "$IMAGE"
 sudo podman cp k3s-image-extract:/usr/share/k3s-kvm-demo/k3s-image.qcow2 "$BASE"
@@ -193,7 +210,7 @@ The container shares this directory with the host so host tools can read the exp
 The following Bash array keeps the shared options visible when running the existing CLI commands:
 
 ```bash
-IMAGE=localhost/k3s-kvm-demo:latest
+IMAGE=ghcr.io/dcermak/k3s-kvm-demo:latest
 BASE=/var/lib/libvirt/images/k3s-base-v2.qcow2
 POOL=/var/lib/libvirt/images/k3s-demo
 options=(
