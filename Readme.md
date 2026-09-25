@@ -119,6 +119,9 @@ the configuration and tmpfiles rule, extracts the golden image if absent,
 initializes the pool, runs `check`, and installs and starts the container via
 quadlet.
 
+**Note:** The default libvirt network is not autostarted on stock
+MicroOS. Enable it by default via `virsh net-autostart default`.
+
 ### Building the container
 
 Run from the repository root after placing the KIWI output at `k3s-image.qcow2`:
@@ -469,60 +472,3 @@ The default suite does not touch `qemu:///system`.
 The separately enabled tests in [tests/integration](tests/integration/Readme.md)
 boot a server and an agent using a supplied v2 image and a dedicated empty pool directory.
 They are skipped unless `K3S_DEMO_VM_TESTS=1` is set. Read their resource and cleanup requirements before enabling them.
-
-Where things live:
-
-| File | Responsibility |
-| --- | --- |
-| `config.py` | TOML loading and validation; every error names its key |
-| `meta.py` | Durable state in domain metadata; the only caller of `setMetadata` |
-| `domxml.py` | Domain and volume XML, built with ElementTree |
-| `conn.py` | Leased libvirt connections |
-| `pool.py` | Pool ownership, volume classification, disk-reference checks |
-| `libvirtctl.py` | Two-volume creation, scoped ownership, idempotent deletion |
-| `guestexec.py` | The guest-agent protocol and QGA implementation |
-| `k3sconf.py` | Per-node k3s configuration |
-| `seed.py` | Seed payload, ISO creation, and libvirt upload |
-| `observer.py` | Bounded guest status polling, durable startup history, fresh join evidence |
-| `image/` | KIWI description, configuration hook, guest command, and systemd units |
-| `Containerfile` | Installed dashboard runtime and bundled golden image |
-| `contrib/k3s-demo.container` | Rootful Podman Quadlet for the booth host |
-| `cluster.py` | Kubernetes-side housekeeping and kubeconfig export |
-| `stats.py` | Extension point for resource metrics and Kubernetes readiness |
-
-### Adding metrics
-
-Keep resource metrics separate from durable provisioning history and current guest service status.
-Kubernetes `Ready` needs Kubernetes API evidence. Do not infer it from an active systemd unit.
-`stats.enrich` is currently a no-op. Extend the existing `getAllDomainStats` call
-for CPU and memory metrics, and use a Kubernetes API read for node readiness.
-The card template renders optional metric fields when they are available.
-
-## Before the event
-
-Complete these checks on the booth hypervisor with the golden image intended for the event:
-
-1. Deploy a control plane node and two workers; `kubectl get nodes` shows three
-   `Ready`.
-2. Kill a worker: the card disappears, the domain, seed disk, and overlay are gone, and
-   its workload reschedules.
-3. Deploy three control plane nodes. Kill one: `kubectl` still answers. Kill a second: it stops. Reset and rebuild.
-4. Restart `virtqemud` with a node mid-`configuring`: the state survives.
-5. Terminate the dashboard mid-`configuring`. Verify guest preparation completes without it, then restart and confirm status recovery without reprovisioning.
-6. Reboot the host: nodes come back "configured · shut off". Nothing is
-   destroyed.
-7. Kill and replace control plane nodes several times: no `duplicate node name`
-   errors. Etcd members accumulate. Confirm Reset clears them.
-8. Disconnect external networking but retain the libvirt network. Deploy a node and confirm the UI and k3s join still work.
-9. Stop k3s inside a configured guest. Confirm startup history remains configured while current service status changes.
-10. Stop QGA temporarily. Confirm service evidence becomes unknown and new joins are blocked without deleting or restarting existing guests.
-11. Reboot a guest. Confirm its hostname and machine ID remain stable, and that preparation preserves the installed configuration.
-12. Confirm unattended boot from the KIWI image's initial machine-ID state. Compare two clones' generated IDs and DHCP leases for distinct values.
-13. Inspect both guest units with `systemd-analyze verify` in the built image. Confirm readiness notification precedes the `started` marker.
-14. Test interrupted creation and deletion on a disposable host. Confirm recovery deletes only volumes with matching ownership claims.
-15. Check legacy metadata on a disposable host. Confirm v2 refuses startup without changing domains or automatically resetting anything.
-16. Check deletion with multiple demo nodes sharing the standalone base. Confirm an unrelated source-only qcow2 definition does not block cleanup.
-17. On a disposable host, confirm visible foreign references and incomplete backing evidence in managed peers block volume deletion.
-18. With the Quadlet, verify loopback-only HTTP access, container restart, host reboot, and reconnect after libvirt socket recreation.
-19. Confirm stopping the service removes the exported kubeconfig and leaves no dashboard container running.
-20. With host SELinux enforcing, deploy two guests sharing the extracted base, then Reset. Confirm host QEMU can read the base throughout.
