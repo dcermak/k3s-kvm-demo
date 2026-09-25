@@ -24,14 +24,17 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 qemu-utils podman python3-venv
-          pip install --user kiwi kiwi-boxed-plugin
+          sudo apt-get install -y qemu-system-x86 qemu-utils podman
+          sudo pipx ensurepath
+          sudo pipx install kiwi
+          sudo pipx inject kiwi kiwi-boxed-plugin
 
       - name: Build guest image
         working-directory: image
         run: |
-          kiwi-ng system boxbuild --box=tumbleweed -- kiwi --description ./image/ --target-dir /var/tmp/kiwi/
-          cp /var/tmp/kiwi/*.qcow2 "$GITHUB_WORKSPACE/k3s-image.qcow2"
+          sudo /opt/pipx_bin/kiwi-ng system boxbuild --box=tumbleweed -- kiwi --description . --target-dir /var/tmp/kiwi/
+          sudo cp /var/tmp/kiwi/*.qcow2 "$GITHUB_WORKSPACE/k3s-image.qcow2"
+          sudo chown $(id -u):$(id -g) "$GITHUB_WORKSPACE/k3s-image.qcow2"
 
       - name: Build container
         run: podman build --pull=always --tag "$IMAGE:latest" --file Containerfile .
