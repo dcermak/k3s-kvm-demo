@@ -193,37 +193,6 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
     def list_nodes(request: Request, state: AppState = Depends(get_state)) -> HTMLResponse:
         return render(request, state)
 
-    @app.post("/kubeconfig/{action}")
-    def kubeconfig(request: Request, action: str, state: AppState = Depends(get_state)):
-        headers = {"Cache-Control": "no-store"}
-        if action not in {"download", "copy"}:
-            return PlainTextResponse("unknown export action", status_code=404, headers=headers)
-        text, error = None, None
-        try:
-            text = cluster.export_kubeconfig(
-                state.manager.list_nodes(),
-                lambda uuid: guestexec.QemuAgent(
-                    state.cm, uuid, timeout_s=state.cfg.observation.qga_timeout_s
-                ),
-            )
-        except cluster.KubeconfigExportError as exc:
-            error = str(exc)
-        except (libvirt.libvirtError, meta.CompatibilityError, poolmod.PoolError):
-            error = "could not discover control plane nodes"
-        if action == "download" and error is None:
-            return PlainTextResponse(
-                text,
-                media_type="application/yaml",
-                headers={**headers, "Content-Disposition": 'attachment; filename="k3s-demo.yaml"'},
-            )
-        return TEMPLATES.TemplateResponse(
-            request=request,
-            name="_kubeconfig.html",
-            context={"kubeconfig": text, "error": error, "download": action == "download"},
-            status_code=503 if action == "download" else 200,
-            headers=headers,
-        )
-
     @app.post("/deploy/{role}", response_class=HTMLResponse)
     def deploy(request: Request, role: str, state: AppState = Depends(get_state)) -> HTMLResponse:
         if role not in meta.ROLES:

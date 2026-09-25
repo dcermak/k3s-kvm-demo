@@ -19,11 +19,6 @@
       </p>
     </div>
     <nav class="actions">
-      <button class="btn btn-ghost" hx-post="/kubeconfig/copy" hx-target="#kubeconfig-panel"
-              hx-disabled-elt="this">Copy kubeconfig</button>
-      <form method="post" action="/kubeconfig/download">
-        <button class="btn btn-ghost" type="submit">Download kubeconfig</button>
-      </form>
       {{ ui.action("/deploy/agent", "Deploy Node", "btn btn-primary", icon="＋") }}
       {{ ui.action("/deploy/server", "Deploy Control Plane node", "btn btn-tertiary", icon="⬡") }}
       {{ ui.action("/prune-nodes", "Prune Nodes",
@@ -33,7 +28,6 @@
     </nav>
   </header>
 
-  <div id="kubeconfig-panel" aria-live="polite"></div>
   {% include "_grid.html" %}
 </main>
 </body>

@@ -21,8 +21,6 @@ UNSAFE = [
     ("POST", "/deploy/server"),
     ("POST", "/reset"),
     ("POST", "/prune-nodes"),
-    ("POST", "/kubeconfig/download"),
-    ("POST", "/kubeconfig/copy"),
     ("POST", "/nodes/k3s-node-" + "0" * 32 + "/kill"),
 ]
 

@@ -283,8 +283,6 @@ Do not add an empty backing-chain terminator unless the image is verified to hav
 | **Kill node** | Destroys the VM, deletes its seed disk and overlay, then removes its definition. Intentionally ungraceful. |
 | **Prune Nodes** | Deletes Kubernetes `Node` objects for VMs that no longer exist. See the limitation below. |
 | **Reset** | Destroys demo VMs and both owned volumes in this pool/prefix scope. Use between demos or after quorum loss. |
-| **Copy kubeconfig** | Opens a panel with the current export and a **Copy to clipboard** button. |
-| **Download kubeconfig** | Downloads the current export as `k3s-demo.yaml`. |
 
 ### Exporting kubeconfig
 
@@ -336,14 +334,9 @@ For a stopped dashboard, run `export` with the setup section's `podman run` opti
 Native development launches can use `uv run k3s-demo export --output ./k3s-demo.yaml`.
 None of these commands changes `~/.kube/config`.
 
-The dashboard offers **Download kubeconfig** and **Copy kubeconfig**.
-After opening the copy panel, click **Copy to clipboard**.
-If clipboard access is unavailable, copy the selected text manually or use the download button.
-Browser downloads use browser-managed file permissions. Keep the downloaded file private.
-
 All exports grant administrator access to the demo cluster. Do not publish them.
 They point to one VM's IP address on the local libvirt network.
-Manual exports and browser downloads are snapshots. Export again when you need a fresh configuration.
+Manual exports are snapshots. Export again when you need a fresh configuration.
 
 ### Reading a card
 

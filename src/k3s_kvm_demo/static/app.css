@@ -55,19 +55,6 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
 }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.actions form { margin: 0; }
-
-.kubeconfig { margin-bottom: 20px; }
-.kubeconfig textarea {
-  width: 100%;
-  min-width: 0;
-  resize: vertical;
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
 
 .btn {
   font-family: var(--mono);

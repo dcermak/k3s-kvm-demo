@@ -15,7 +15,7 @@ def main():
     assert libvirt.getVersion() > 0
     assert callable(libvirt_qemu.qemuAgentCommand)
     subprocess.run(["k3s-demo", "--help"], check=True, capture_output=True)
-    for name in ("index.html", "_card.html", "_grid.html", "_kubeconfig.html", "_macros.html"):
+    for name in ("index.html", "_card.html", "_grid.html", "_macros.html"):
         app.TEMPLATES.get_template(name)
     for name in ("app.css", "htmx.min.js", "notifications.js"):
         assert (app.HERE / "static" / name).stat().st_size > 0
