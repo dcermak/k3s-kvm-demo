@@ -87,8 +87,56 @@ class AppState:
         self.manager.check_compatible()
         if not self.cfg.libvirt.is_test_driver:
             self.manager.require_owned_pool()
+        self._recover_nodes()
         self.observer.start()
         self.exporter.start()
+
+    def _recover_nodes(self) -> None:
+        for node in self.manager.list_nodes():
+            if node.state in meta.INCOMPLETE:
+                try:
+                    self.manager.delete_if_current(node.uuid, node.generation, node.state)
+                except meta.CompatibilityError:
+                    raise
+                except Exception:
+                    log.exception("could not clean up interrupted node %s", node.name)
+
+        if not self.cfg.vm.autostart_on_launch:
+            return
+        nodes = sorted(
+            self.manager.list_nodes(), key=lambda node: (not node.is_server, not node.bootstrap)
+        )
+        started = skipped = failed = 0
+        # Submit every server start before workers, without waiting for etcd quorum or QGA.
+        for node in nodes:
+            try:
+                if self.manager.start_if_current(node.uuid, node.generation, node.state):
+                    started += 1
+                    log.info("started retained node %s", node.name)
+                else:
+                    skipped += 1
+            except meta.CompatibilityError:
+                raise
+            except Exception:
+                log.exception("start failed or reply was lost for retained node %s", node.name)
+                # A read repairs a lost connection before the next node's mutation.
+                # It also resolves a successful start whose reply was lost, without replaying it.
+                try:
+                    current = self.manager.get(node.name)
+                    running = current.uuid == node.uuid and current.running
+                    log.info(
+                        "retained node %s power after start error: %s", node.name, current.power
+                    )
+                except meta.CompatibilityError:
+                    raise
+                except Exception:
+                    running = False
+                    log.exception("could not determine power of retained node %s", node.name)
+                if running:
+                    started += 1
+                else:
+                    failed += 1
+        log.info("launch recovery: %d started, %d skipped, %d failed", started, skipped, failed)
 
     def shutdown(self) -> None:
         export_drained = self.exporter.shutdown()

@@ -365,6 +365,37 @@ class NodeManager:
         with self.lock:
             return self.cm.call(run)
 
+    # -- launch recovery ---------------------------------------------------
+
+    def start_if_current(self, uuid: str, generation: int, expected_state: str) -> bool:
+        """Start a retained shut-off guest without changing its provisioning history."""
+        def run(conn: libvirt.virConnect) -> bool:
+            meta.check_compatible(conn)
+            dom = self._lookup(conn, uuid)
+            if dom is None:
+                return False
+            current = meta.try_read(dom)
+            if (
+                current is None
+                or not self._in_scope(conn, current)
+                or current.generation != generation
+                or current.state != expected_state
+                or current.state not in {meta.BOOTING, meta.CONFIGURING, meta.CONFIGURED}
+            ):
+                return False
+            expected_name = names.node_name(current.scope_prefix, UUID(uuid).hex)
+            if dom.name() != expected_name or (current.volume, current.seed_volume) != (
+                names.volume_name(expected_name), names.seed_volume_name(expected_name)
+            ):
+                raise poolmod.PoolError("metadata claims do not match domain identity")
+            if dom.state()[0] != libvirt.VIR_DOMAIN_SHUTOFF:
+                return False
+            dom.create()
+            return True
+
+        with self.lock:
+            return self.cm.call(run)
+
     # -- deploy ------------------------------------------------------------
 
     def plan(self, nodes: list[Node], role: str) -> tuple[bool, str | None]:

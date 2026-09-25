@@ -30,6 +30,8 @@ vcpus = 4
 name_prefix = "k3s-node"
 # A hard ceiling so a visitor cannot exhaust the booth machine.
 max_nodes = 8
+# Start retained, stopped nodes once when the dashboard launches.
+autostart_on_launch = true
 
 [cluster]
 # Pre-shared join secret, used by every node. Change it.

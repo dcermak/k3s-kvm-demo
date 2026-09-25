@@ -96,7 +96,33 @@ sudo systemctl stop k3s-demo.service
 ```
 
 Stopping leaves VMs running and removes the automatic kubeconfig export on normal shutdown.
-After a host reboot, configured guests may be shut off; the dashboard retains them.
+
+### Launch recovery
+
+Each dashboard launch cleans up interrupted creation and deletion operations, then starts eligible stopped VMs.
+Autostart defaults to enabled, including for existing configurations that omit the setting.
+To keep stopped VMs stopped across dashboard launches, set:
+
+```toml
+[vm]
+autostart_on_launch = false
+```
+
+Autostart applies to shut-off nodes in `booting`, `configuring`, or `configured` state.
+Failed, paused, suspended, crashed, and unknown-state nodes require operator attention.
+Cleanup of interrupted operations also runs when autostart is disabled.
+
+Recovery runs once per dashboard launch. A VM stopped afterward stays stopped until the next launch.
+A failed start is logged, and recovery continues with other eligible VMs.
+Check `journalctl -u k3s-demo.service` for node-specific errors and the recovery summary.
+After correcting a start failure, restart the dashboard or start the affected VM directly:
+
+```bash
+sudo virsh -c qemu:///system start FULL_VM_NAME
+```
+
+Use the configured libvirt URI and the VM's full name.
+Host-boot recovery requires the dashboard service, active libvirt network, and original VM storage, including backing images.
 
 ## Updating
 
@@ -152,6 +178,7 @@ Manual exports are snapshots targeting one VM. Export again if that server disap
 | Symptom | Action |
 | --- | --- |
 | Dashboard unavailable | Check `systemctl status k3s-demo.service`, its journal, and the required libvirt sockets. |
+| Retained VM stays shut off after dashboard launch | Check `vm.autostart_on_launch`, the node's provisioning state, and launch recovery errors in the service journal. |
 | Unknown guest status or joins blocked | Inspect the guest console and `journalctl -u k3s-demo-prepare.service -u k3s-node.service`. Check the QEMU guest agent (QGA). |
 | `configured` but not Kubernetes `Ready` | Check current k3s service status and Kubernetes. `configured` records past startup success. |
 | Export missing | Check for a running, configured server with an IP address, working QGA, and a writable export directory. |

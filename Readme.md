@@ -52,6 +52,11 @@ sudo journalctl -u k3s-demo.service -n 50
 
 ## Running a demo
 
+The dashboard starts retained, stopped nodes once on each launch, including after a host reboot.
+It starts control-plane VMs before workers and preserves their disks and configuration.
+Set `vm.autostart_on_launch = false` to keep stopped nodes stopped across dashboard launches.
+See [launch recovery](docs/operations.md#launch-recovery) for eligible states and failure handling.
+
 | Button | Action |
 | --- | --- |
 | **Deploy Control Plane node** | Bootstrap the cluster or join another embedded-etcd server. |
@@ -118,7 +123,7 @@ Use **Reset** to recover from quorum loss. See [troubleshooting](docs/operations
 
 - Rehearse both demonstrations on the booth host with the intended image.
 - Confirm Reset removes the demo VMs and their node volumes.
-- Check service startup after a host reboot.
+- Check that a host reboot restores the dashboard, retained VMs, and cluster readiness.
 - If operating offline, disconnect external networking and repeat node deployment and the workload demo.
 
 ## Further documentation

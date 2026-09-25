@@ -55,6 +55,7 @@ class VMConfig:
     vcpus: int = 2
     name_prefix: str = "k3s-node"
     max_nodes: int = 8
+    autostart_on_launch: bool = True
 
     @property
     def disk_bytes(self) -> int:
@@ -249,6 +250,9 @@ def _load_vm(section: dict) -> VMConfig:
     memory_mb = _positive_int(section, "vm", "memory_mb", VMConfig.memory_mb, minimum=512)
     vcpus = _positive_int(section, "vm", "vcpus", VMConfig.vcpus)
     max_nodes = _positive_int(section, "vm", "max_nodes", VMConfig.max_nodes)
+    autostart = section.get("autostart_on_launch", VMConfig.autostart_on_launch)
+    if not isinstance(autostart, bool):
+        raise ConfigError("vm.autostart_on_launch", "must be a boolean")
 
     info = _qemu_img_info(base_image)
     if info.get("backing_file"):
@@ -271,6 +275,7 @@ def _load_vm(section: dict) -> VMConfig:
         vcpus=vcpus,
         name_prefix=prefix,
         max_nodes=max_nodes,
+        autostart_on_launch=autostart,
     )
 
 
