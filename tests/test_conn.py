@@ -1,4 +1,4 @@
-"""Connection leases, reconnection and the singleton lock.
+"""Connection leases and reconnection.
 
 Two properties matter most.  A connection must never be closed while another
 thread is inside a call on it, and holding a lease must not serialise other
@@ -13,7 +13,7 @@ import time
 import libvirt
 import pytest
 
-from k3s_kvm_demo.conn import AlreadyRunning, ConnectionManager, SingletonLock
+from k3s_kvm_demo.conn import ConnectionManager
 
 from .conftest import fake_libvirt_error
 
@@ -206,46 +206,3 @@ def test_state_survives_a_reconnect_on_the_real_test_driver(cfg):
         assert manager.epoch == 1
     finally:
         manager.close()
-
-
-# -- singleton lock --------------------------------------------------------
-
-
-def test_singleton_lock_excludes_a_second_holder(tmp_path):
-    path = tmp_path / "demo.lock"
-    first = SingletonLock(path)
-    first.acquire()
-    try:
-        second = SingletonLock(path)
-        with pytest.raises(AlreadyRunning, match="another k3s-kvm-demo instance"):
-            second.acquire()
-    finally:
-        first.release()
-
-    # Once released, the next process may take it.
-    third = SingletonLock(path)
-    third.acquire()
-    third.release()
-
-
-def test_singleton_lock_records_the_pid(tmp_path):
-    import os
-
-    path = tmp_path / "demo.lock"
-    with SingletonLock(path):
-        assert path.read_text().strip() == str(os.getpid())
-
-
-def test_singleton_lock_does_not_create_a_missing_parent(tmp_path):
-    path = tmp_path / "missing" / "demo.lock"
-    with pytest.raises(FileNotFoundError):
-        SingletonLock(path).acquire()
-    assert not path.parent.exists()
-
-
-def test_acquiring_twice_in_one_process_is_harmless(tmp_path):
-    lock = SingletonLock(tmp_path / "demo.lock")
-    lock.acquire()
-    lock.acquire()
-    lock.release()
-    lock.release()

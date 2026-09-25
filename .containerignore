@@ -1,0 +1,13 @@
+# Only these inputs enter the build context. The qcow2 is intentionally bundled.
+**
+!Containerfile
+!.containerignore
+!pyproject.toml
+!uv.lock
+!Readme.md
+!src/
+!src/**
+!k3s-image.qcow2
+**/__pycache__
+**/*.py[cod]
+**/*~

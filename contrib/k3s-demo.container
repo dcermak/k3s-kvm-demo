@@ -1,0 +1,37 @@
+[Unit]
+Description=k3s KVM demo dashboard
+Documentation=https://github.com/SUSE-Rancher-Community/k3s-kvm-demo
+# MicroOS with modular libvirt. For monolithic libvirt use libvirtd.socket.
+Wants=virtqemud.socket virtstoraged.socket virtnetworkd.socket
+After=virtqemud.socket virtstoraged.socket virtnetworkd.socket systemd-tmpfiles-setup.service
+
+[Container]
+Image=localhost/k3s-kvm-demo:latest
+ContainerName=k3s-demo
+User=0
+Network=host
+Environment=K3S_DEMO_CONFIG=/etc/k3s-kvm-demo/config.toml
+Volume=/etc/k3s-kvm-demo/config.toml:/etc/k3s-kvm-demo/config.toml:ro
+Volume=/run/libvirt:/run/libvirt:ro
+Volume=/run/k3s-kvm-demo:/run/k3s-kvm-demo:rw
+# Match vm.base_image exactly on both sides. Keep the base outside the demo pool.
+Volume=/var/lib/libvirt/images/k3s-base-v2.qcow2:/var/lib/libvirt/images/k3s-base-v2.qcow2:ro
+ReadOnly=true
+Tmpfs=/tmp:rw,mode=1777
+DropCapability=all
+NoNewPrivileges=true
+# Exempt this trusted management container; retain host and QEMU SELinux policy.
+# Do not relabel the shared libvirt sockets or images with :z or :Z.
+SecurityLabelDisable=true
+StopTimeout=90
+Exec=serve
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+# The bundled VM image can make an initial registry pull take several minutes.
+TimeoutStartSec=900
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 from k3s_kvm_demo import cli, meta, pool as poolmod
-from k3s_kvm_demo.conn import AlreadyRunning, SingletonLock
 from k3s_kvm_demo.observer import Observer
 
 from .conftest import unmanaged_domain_xml
@@ -35,21 +34,12 @@ def test_stdout_export_coexists_with_dashboard_without_mutations(
     monkeypatch.setattr(Observer, "start", forbidden_start)
     before = inventory(conn)
     assert cfg.source is None
-    with SingletonLock(cfg.server.lock_path):
-        contender = SingletonLock(cfg.server.lock_path)
-        try:
-            with pytest.raises(AlreadyRunning):
-                contender.acquire()
-            with caplog.at_level("DEBUG"):
-                assert cli.main(["-c", str(config_file), "export"]) == 0
-            captured = capsys.readouterr()
-            assert captured.err == ""
-            assert yaml.safe_load(captured.out) == expected_document(candidate_cluster)
-            with pytest.raises(AlreadyRunning):
-                contender.acquire()
-            assert client.get("/healthz").status_code == 200
-        finally:
-            contender.release()
+    with caplog.at_level("DEBUG"):
+        assert cli.main(["-c", str(config_file), "export"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert yaml.safe_load(captured.out) == expected_document(candidate_cluster)
+    assert client.get("/healthz").status_code == 200
     assert_guest_read(export_agent, candidate_cluster)
     assert inventory(conn) == before
     assert SECRET not in caplog.text

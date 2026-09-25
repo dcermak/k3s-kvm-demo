@@ -147,7 +147,7 @@ def base_image(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def config_values(base_image: Path) -> dict:
+def config_values(base_image: Path, tmp_path: Path) -> dict:
     return {
         "server": {"bind": "127.0.0.1", "port": 8000, "allowed_hosts": ["testserver"]},
         "libvirt": {"uri": TEST_URI, "pool": TEST_POOL, "network": "default"},
@@ -160,6 +160,7 @@ def config_values(base_image: Path) -> dict:
             "max_nodes": 4,
         },
         "cluster": {"token": "test-token", "tls_san": []},
+        "kubeconfig_export": {"path": str(tmp_path / "kubeconfig.yaml"), "interval_s": 1},
         "observation": {
             "interval_s": 2,
             "qga_timeout_s": 2,
@@ -415,15 +416,19 @@ def faulty_manager(cfg, marked_pool, faults, seed_upload) -> NodeManager:
 
 
 @pytest.fixture
-def app_state(cfg, manager, observer):
+def app_state(cfg, manager, observer, monkeypatch):
     from k3s_kvm_demo.app import AppState
+    from k3s_kvm_demo.kubeconfig_export import KubeconfigExporter
+
+    exporter = KubeconfigExporter(manager, cfg)
+    monkeypatch.setattr(exporter, "start", lambda: None)
 
     return AppState(
         cfg=cfg,
         cm=manager.cm,
         manager=manager,
         observer=observer,
-        singleton=None,
+        exporter=exporter,
     )
 
 

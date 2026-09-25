@@ -11,11 +11,6 @@ port = 8000
 # Host headers the dashboard will accept mutating requests from. Loopback
 # binding alone does not stop a page on another origin POSTing here.
 allowed_hosts = ["127.0.0.1:8000", "localhost:8000"]
-# Must be absolute. Use the same path for service and manual launches, regardless
-# of the working directory or XDG_RUNTIME_DIR. The parent directory must
-# already exist and be writable by the dashboard account. init-pool does not
-# create it; use the service RuntimeDirectory or the manual setup in Readme.md.
-lock_path = "/run/k3s-kvm-demo/dashboard.lock"
 
 [libvirt]
 uri = "qemu:///system"
@@ -27,17 +22,13 @@ pool = "k3s-demo"
 network = "default"
 
 [vm]
-# Build a new v2 image with firstboot/k3s-demo-guest and both repository-owned
-# units installed; enable k3s-node.service and qemu-guest-agent.service.
-# Disable/mask packaged k3s units and clear cluster data. Leave /etc/machine-id
-# empty so PID 1 generates an ID without interactive first-boot setup or presets.
-# Remove /var/lib/dbus/machine-id and /var/lib/systemd/random-seed.
-# See Readme.md for the full contract and scripts/build-image.sh for the recipe.
+# Build the guest using image/k3s-image.kiwi and the boxbuild plugin.
+# The Containerfile bundles repository-root k3s-image.qcow2. Extract it to the
+# host before starting the dashboard; see Readme.md for the Podman commands.
 # The base must be standalone qcow2, with no backing file of its own.
 # Keep it OUTSIDE the demo pool. Never overwrite an existing backing image.
-# The builder defaults to this v2 path, refuses overwrite, and publishes atomically.
-# Prefer an absolute path. Relative paths resolve from the process's working
-# directory, not from this configuration file's directory.
+# Use an absolute host path and mount it at the identical container path.
+# Update the base-image Volume= line in contrib/k3s-demo.container to match.
 base_image = "/var/lib/libvirt/images/k3s-base-v2.qcow2"
 # Overlay capacity. Must be at least the base image's virtual size.
 disk_gb = 24
@@ -63,6 +54,13 @@ qga_timeout_s = 2
 # Older evidence becomes unknown and cannot authorize a new cluster join.
 # All observation values must be positive integers; stale_after_s > interval_s.
 stale_after_s = 30
+
+[kubeconfig_export]
+# Continuously replaced while the dashboard runs; removed on failure or shutdown.
+# Use a dedicated absolute path in an existing writable directory.
+# The example container already shares this directory with the host.
+path = "/run/k3s-kvm-demo/kubeconfig.yaml"
+interval_s = 1
 
 [maintenance]
 # How long shutdown waits for in-flight guest-agent calls before giving up and

@@ -27,8 +27,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import cluster, guestexec, libvirtctl, meta, pool as poolmod, seed, stats
-from .config import Config
-from .conn import ConnectionManager, SingletonLock
+from .config import Config, validate_export_path
+from .conn import ConnectionManager
+from .kubeconfig_export import KubeconfigExporter
 from .libvirtctl import DeployRefused, NodeManager, NodeNotFound
 from .observer import Observer
 
@@ -77,27 +78,29 @@ class AppState:
     cm: ConnectionManager
     manager: NodeManager
     observer: Observer
-    singleton: SingletonLock | None = None
+    exporter: KubeconfigExporter
     flashes: Flashes = field(default_factory=Flashes)
 
     def startup(self) -> None:
+        validate_export_path(self.cfg)
         self.cm.open()
         self.manager.check_compatible()
         if not self.cfg.libvirt.is_test_driver:
             self.manager.require_owned_pool()
         self.observer.start()
+        self.exporter.start()
 
     def shutdown(self) -> None:
+        export_drained = self.exporter.shutdown()
         drained = self.observer.shutdown()
+        drained = drained and export_drained
         if drained:
-            drained = self.cm.close()
+            self.cm.close()
         else:
             # A worker is still inside a libvirt or guest-agent call; closing
             # the connection under it would be a use-after-free. Daemon threads
             # mean the process still exits promptly.
             log.warning("shutting down with work in flight; leaving the connection open")
-        if drained and self.singleton is not None:
-            self.singleton.release()
 
     def snapshot(self) -> list[libvirtctl.Node]:
         nodes = self.manager.list_nodes()
@@ -106,8 +109,7 @@ class AppState:
 
 
 def build_state(cfg: Config) -> AppState:
-    singleton = SingletonLock(cfg.server.lock_path)
-    singleton.acquire()
+    validate_export_path(cfg)
     cm = ConnectionManager(cfg.libvirt.uri)
     manager = NodeManager(cm, cfg)
     return AppState(
@@ -115,7 +117,7 @@ def build_state(cfg: Config) -> AppState:
         cm=cm,
         manager=manager,
         observer=Observer(manager, cfg),
-        singleton=singleton,
+        exporter=KubeconfigExporter(manager, cfg),
     )
 
 
@@ -300,7 +302,6 @@ def create_app(cfg: Config, state_factory: Callable[[], AppState] | None = None)
         payload: dict[str, object] = {
             "uri": state.cfg.libvirt.uri,
             "connection_epoch": state.cm.epoch,
-            "singleton_lock": state.singleton is not None,
             "observation_stale_after_s": state.cfg.observation.stale_after_s,
         }
         try:

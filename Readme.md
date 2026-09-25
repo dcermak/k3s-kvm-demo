@@ -11,8 +11,6 @@ workload move. Kill a control plane node from a three-server cluster and watch
 
 - Backend: FastAPI + `libvirt-python`, managed with `uv`.
 - Frontend: server-rendered HTML and htmx
-- **No database.** libvirt's own domain metadata is the only store, so the
-  dashboard rediscovers everything on restart.
 
 > **This dashboard is not authenticated.** It destroys VMs and runs commands as
 > root inside guests. It binds loopback only. A non-loopback `bind` is a
@@ -21,26 +19,18 @@ workload move. Kill a control plane node from a three-server cluster and watch
 
 ## Requirements
 
-On the booth machine:
+The container deployment targets x86_64 MicroOS with rootful Podman and Quadlet.
+The host needs working KVM, system libvirt, and an active libvirt network with DHCP.
+The example uses `qemu:///system` and the `default` network.
+On modular libvirt installations, activate `virtqemud.socket`, `virtstoraged.socket`, and `virtnetworkd.socket`.
+For monolithic libvirt, use `libvirtd.socket` and adjust the Quadlet dependencies.
 
-```bash
-# Fedora / RHEL
-sudo dnf install libvirt libvirt-devel gcc pkgconf-pkg-config python3-devel qemu-img xorriso
-# openSUSE
-sudo zypper install libvirt libvirt-devel gcc pkg-config python3-devel qemu-tools xorriso
-
-sudo usermod -aG libvirt "$USER"     # log out and back in
-
-uv sync
-```
-
-The host also needs an active libvirt network with DHCP and working KVM.
-`xorriso` creates each node's seed ISO on the host before the VM starts.
+The container includes Python, the libvirt client, `qemu-img`, and `xorriso`.
+Host libvirt runs the VMs and manages their disks and network.
+The dashboard builds seed ISOs inside the container and uploads them through libvirt.
+The kiosk browser runs on the host at `http://127.0.0.1:8000/`.
 
 ## The golden image
-
-> **Guest boot remains unverified.** The opt-in VM test has not been run against
-> the v2 image. Collection and mocked tests do not verify guest boot or systemd behavior.
 
 The dashboard boots a standalone qcow2 image you supply and never modifies it.
 The golden image must have no backing file of its own. A node overlay is not a
@@ -50,9 +40,9 @@ valid golden image. The v2 guest-image contract requires:
    its version.
 2. Install and enable `qemu-guest-agent.service`. The QEMU guest agent (QGA)
    reports guest status.
-3. Install `firstboot/k3s-demo-guest` as `/usr/local/libexec/k3s-demo-guest`,
+3. Install `image/k3s-demo-guest` as `/usr/local/libexec/k3s-demo-guest`,
    owned by root, with mode `0755`.
-4. Install `firstboot/k3s-demo-prepare.service` and `firstboot/k3s-node.service`
+4. Install `image/k3s-demo-prepare.service` and `image/k3s-node.service`
    in `/etc/systemd/system`, with mode `0644`.
 5. Enable `k3s-node.service`. Its dependency starts `k3s-demo-prepare.service`,
    which does not need separate enablement.
@@ -60,8 +50,9 @@ valid golden image. The v2 guest-image contract requires:
    `k3s-agent.service` to prevent competing services.
 7. Remove `/var/lib/rancher/k3s`, `/etc/rancher/k3s/config.yaml`, and
    `/var/lib/k3s-kvm-demo` from the image.
-8. Leave `/etc/machine-id` empty. Remove `/var/lib/dbus/machine-id` and
-   `/var/lib/systemd/random-seed` before cloning.
+8. Arrange for each clone to generate its own machine ID. The KIWI hook writes
+   `uninitialized` to `/etc/machine-id` and enables `systemd-firstboot`.
+   Remove `/var/lib/systemd/random-seed` before cloning.
 9. Provide `/bin/sh`, systemd, coreutils, and util-linux tools, including
    `flock`, `mount`, and `timeout`.
 10. `qemu-guest-agent` must be configured to allow remote command execution,
@@ -70,42 +61,28 @@ valid golden image. The v2 guest-image contract requires:
     arguments, e.g. by providing an `/etc/sysconfig/qemu-ga` with
     `FILTER_RPC_ARGS=""`
 
-An empty `/etc/machine-id` is accepted and preferred over a missing file.
-Ordinary systemd startup, through PID 1, generates a fresh machine ID for each clone.
-The empty file avoids `ConditionFirstBoot=yes`, interactive first-boot setup, and first-boot presets that could change the enabled units.
-Guest preparation does not generate the machine ID or invoke `systemd-firstboot`.
-Preparation does not derive IDs from hashes or install custom udev rules.
-Disable cloud-init if the image includes it: this deployment supplies no cloud-init datasource.
 
 ### Building a v2 image
 
-`scripts/build-image.sh` builds from openSUSE Tumbleweed Minimal VM, using the
-`-Cloud` flavor. Run it before the event on a machine with Internet access.
-The build requires `curl`, `qemu-img`, and `virt-customize` from the distribution's libguestfs tools package.
-
-**Choose a new output path. Never overwrite an image that backs existing overlays.**
-The builder defaults to `/var/lib/libvirt/images/k3s-base-v2.qcow2`.
-It rejects an existing output, including a symlink, and atomically publishes the completed image without replacing an existing path.
-For later rebuilds, set `OUTPUT` to another unused path.
-Run this example from the repository root:
+Build `image/k3s-image.kiwi` with KIWI's boxbuild plugin before the event.
+Run this command from `image/` on a machine with Internet access:
 
 ```bash
-OUTPUT=/var/lib/libvirt/images/k3s-base-v2.qcow2 bash scripts/build-image.sh
+kiwi-ng system boxbuild --box=tumbleweed -- --description . --target-dir /var/tmp/kiwi/
 ```
 
-The output directory must already exist and be writable and searchable by the build account.
-The builder does not create it. Publication requires a filesystem that supports hard links.
-Inspect the result with `qemu-img info`: the format must be `qcow2`, with no backing file.
-`virt-cat -a /var/lib/libvirt/images/k3s-base-v2.qcow2 /etc/machine-id` must produce empty output.
-Set `vm.base_image` to the new path after the build succeeds.
-Do not boot the golden image into a cluster before cloning it.
-Provisioning needs the local VM network, but no Internet access to install k3s.
-Workloads also need locally available container images for an offline demonstration.
+Copy the completed qcow2 from `/var/tmp/kiwi/` to `k3s-image.qcow2` in the repository root.
+The Containerfile bundles that file unchanged.
+
+**Never overwrite a golden image that backs existing overlays.**
+Build and extract replacements at unused paths, outside the demo pool.
+Do not boot the golden image itself into a cluster.
+Offline operation also requires the Kubernetes workload images to be available inside the guests.
 
 ### Guest-owned provisioning
 
 Each VM has two owned volumes: a writable qcow2 overlay and a seed ISO.
-The host uses `xorriso` to build the ISO with the label `K3SDEMO` and attaches it as a read-only virtio disk.
+The dashboard uses `xorriso` to build the ISO with the label `K3SDEMO` and attaches it as a read-only virtio disk.
 The seed contains node identity, role, hostname, and k3s configuration, including the join token.
 Treat both volumes and their backups as sensitive. Do not publish seed files or use production credentials for this demo.
 
@@ -121,52 +98,133 @@ The dashboard uses QGA for bounded status commands, kubeconfig export, and expli
 It does not inject provisioning scripts or start k3s through QGA.
 Guest preparation continues if the dashboard or QGA becomes unavailable.
 
-### Upgrading from the old image
-
-Legacy or unsupported domain metadata blocks startup and mutations. The dashboard never resets or converts it automatically.
-There is no live adoption of old guests into v2.
-
-1. Decide whether to discard the old demo cluster. Preserve required data before choosing Reset.
-2. If you choose to discard it, use the old dashboard version and configuration to Reset before upgrading.
-3. Stop the old dashboard, then build the v2 image at a new path as described above.
-4. Update the application and configuration together. Replace `[firstboot]` with `[observation]` from `config.example.toml`.
-5. Remove obsolete maintenance settings. Keep `shutdown_grace_s`, and add `server.lock_path` from the example.
-6. Validate the configuration and deploy new guests.
-
-If you keep legacy guests, stop here: v2 remains blocked while their metadata exists on the same hypervisor connection.
-Use a separate test host for v2 rather than changing their metadata by hand.
-Once v2 domains exist, binary-only rollback to the old dashboard is unsupported.
-Returning to the old version requires an explicit teardown with the v2 tools and a separate rebuild, not metadata editing.
-Keep the old backing image unchanged for as long as any overlay references it.
-
 ## Setup
 
-Run the following commands from the repository root:
+### Building the container
+
+Run from the repository root after placing the KIWI output at `k3s-image.qcow2`:
 
 ```bash
-cp config.example.toml config.toml
-$EDITOR config.toml                  # base_image, token
-
-# For manual operation only, provision the runtime directory for this account.
-# Do not run this against a directory used by a running service account.
-sudo install -d -m 0750 -o "$USER" -g "$(id -gn)" /run/k3s-kvm-demo
-
-uv run k3s-demo init-pool            # creates a dedicated storage pool
-uv run k3s-demo check                # validates config against the hypervisor
-uv run k3s-demo serve
+sudo podman build -t localhost/k3s-kvm-demo:latest -f Containerfile .
 ```
 
-Then point a kiosk browser at `http://127.0.0.1:8000/`.
+The build uses `opensuse/tumbleweed` and installs production Python dependencies from `uv.lock`.
+The running container uses the installed environment directly and does not install packages at startup.
+The build context excludes local configuration, credentials, caches, and image-build output, except for the explicitly bundled qcow2.
 
-`init-pool` only creates the libvirt storage pool. It does not create the lock
-directory. `check` and `serve` both require the configured lock directory to
-exist and be writable by the account that runs them.
+To distribute the container, use ordinary Podman commands with your registry reference:
+
+```bash
+sudo podman tag localhost/k3s-kvm-demo:latest REGISTRY/PROJECT/k3s-kvm-demo:latest
+sudo podman push REGISTRY/PROJECT/k3s-kvm-demo:latest
+# On the booth host:
+sudo podman pull REGISTRY/PROJECT/k3s-kvm-demo:latest
+```
+
+Use that reference for `IMAGE` below and for `Image=` in the Quadlet.
+
+### GitHub Actions builds
+
+The workflow in `.github/workflows/build.yml` builds the guest with KIWI boxbuild, then bundles it using the existing Containerfile.
+It runs on `ubuntu-latest` for pushes to `main`, pull requests targeting `main`, and every Monday at 04:23 UTC.
+Each run installs current KIWI and boxed-plugin versions.
+
+In `dcermak/k3s-kvm-demo`, main pushes and scheduled runs publish these container tags:
+
+- `ghcr.io/dcermak/k3s-kvm-demo:latest`
+- `ghcr.io/dcermak/k3s-kvm-demo:build-<run-id>-<attempt>`
+
+Pull requests build without publishing. Publication uses the repository's `GITHUB_TOKEN` with `packages: write` permission.
+After the first push, set the GHCR package visibility to public in its package settings.
+
+To use the published container, pull it and set `IMAGE` and the Quadlet's `Image=` to the same reference:
+
+```bash
+sudo podman pull ghcr.io/dcermak/k3s-kvm-demo:latest
+```
+
+The guest image retains its fixed demo credentials and enables SSH. Use it only for demos, not production.
+
+### Extracting the golden image
+
+Host libvirt cannot read the qcow2 inside the container's private filesystem.
+Extract it once into host storage, outside the demo pool.
+These commands use the example base path; choose a new filename if it already exists.
+
+```bash
+IMAGE=localhost/k3s-kvm-demo:latest
+BASE=/var/lib/libvirt/images/k3s-base-v2.qcow2
+sudo podman create --name k3s-image-extract "$IMAGE"
+sudo podman cp k3s-image-extract:/usr/share/k3s-kvm-demo/k3s-image.qcow2 "$BASE"
+sudo podman rm k3s-image-extract
+sudo chmod 0644 "$BASE"
+```
+
+The parent directory must exist. `podman cp` can overwrite files and can leave a partial file if interrupted.
+After a failed copy, remove only the newly chosen partial output and retry.
+Ensure host QEMU can traverse the parent directories and read the file under the host's security policy.
+Container `label=disable` does not grant host QEMU access. Restore the new file's expected host label where required.
+Do not recursively relabel existing libvirt storage.
+
+### Configuring the host
+
+Install the configuration and kubeconfig export directory rule from the repository:
+
+```bash
+sudo install -d -m 0750 /etc/k3s-kvm-demo
+sudo install -m 0600 config.example.toml /etc/k3s-kvm-demo/config.toml
+sudoedit /etc/k3s-kvm-demo/config.toml
+sudo install -m 0644 contrib/k3s-demo-tmpfiles.conf /etc/tmpfiles.d/k3s-demo.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/k3s-demo.conf
+```
+
+Set `vm.base_image` to `BASE` and choose a private cluster token.
+Use canonical absolute paths. The base-image mount must use the same path on the host and inside the container.
+Keep `server.bind = "127.0.0.1"`; host networking makes that listener accessible to the kiosk browser.
+
+The tmpfiles rule creates `/run/k3s-kvm-demo` at boot with mode `0700` for private kubeconfig export.
+The container shares this directory with the host so host tools can read the exported kubeconfig.
+
+`init-pool` only creates the libvirt storage pool. It does not create the kubeconfig export directory.
+`check` and `serve` require the parent of `kubeconfig_export.path` to exist and be writable by the account that runs them.
+
+### Initializing and checking
+
+The following Bash array keeps the shared options visible when running the existing CLI commands:
+
+```bash
+IMAGE=localhost/k3s-kvm-demo:latest
+BASE=/var/lib/libvirt/images/k3s-base-v2.qcow2
+POOL=/var/lib/libvirt/images/k3s-demo
+options=(
+  --rm --network=host --read-only --cap-drop=all
+  --security-opt=no-new-privileges --security-opt=label=disable
+  --tmpfs /tmp:rw,mode=1777
+  -v /run/libvirt:/run/libvirt:ro
+  -v /run/k3s-kvm-demo:/run/k3s-kvm-demo:rw
+  -v /etc/k3s-kvm-demo/config.toml:/etc/k3s-kvm-demo/config.toml:ro
+  -v "$BASE:$BASE:ro"
+)
+
+# Use an empty directory dedicated to this deployment.
+sudo install -d "$POOL"
+sudo podman run "${options[@]}" -v "$POOL:$POOL:ro" "$IMAGE" init-pool --path "$POOL"
+sudo podman run "${options[@]}" "$IMAGE" check
+```
+
+Match `POOL` to the configured pool's host target. The extra setup mount lets `init-pool` inspect the actual host directory.
+Libvirt writes the pool through its API, even though this mount is read-only.
+Normal serving needs no pool mount. Existing pools must already have the intended target.
+
+For a foreground session, run `sudo podman run "${options[@]}" "$IMAGE" serve`.
+For boot-time startup, install the [Quadlet](#running-as-a-service).
+The libvirt socket mount permits VM mutations even with `:ro`; treat the container as a trusted host-management process.
 
 The CLI selects configuration in this order: `--config`, `K3S_DEMO_CONFIG`, then `config.toml` in the current directory.
-Place the option before the subcommand, for example `uv run k3s-demo --config /etc/k3s-kvm-demo/config.toml check`.
+Place the option before the subcommand. The container sets `K3S_DEMO_CONFIG=/etc/k3s-kvm-demo/config.toml` by default.
 A relative `vm.base_image` resolves from the process's working directory, not the configuration file's directory.
 Use an absolute image path so service and manual launches select the same file.
-`server.lock_path` must be absolute. Use an absolute directory with `init-pool --path` if overriding the default pool location.
+Use an absolute directory with `init-pool --path` if overriding the default pool location.
 
 ### Why a dedicated pool
 
@@ -213,26 +271,62 @@ Do not add an empty backing-chain terminator unless the image is verified to hav
 
 ### Exporting kubeconfig
 
+While the dashboard runs, it exports kubeconfig to `/run/k3s-kvm-demo/kubeconfig.yaml` roughly every second, without an open browser:
+
+```bash
+sudo kubectl --kubeconfig /run/k3s-kvm-demo/kubeconfig.yaml get nodes
+```
+
+This works for native launches and the example container, which already shares the runtime directory with the host.
+The file has permissions `0600` and belongs to the dashboard account, normally root.
+Updates replace the file atomically when its contents change.
+The dashboard removes it when export fails or during normal shutdown, and recreates it when retrieval succeeds.
+Slow guest-agent calls can delay refreshes and failure detection.
+A forced termination can leave the file behind until the next dashboard startup.
+
+To change the destination or interval, add this section to your configuration:
+
+```toml
+[kubeconfig_export]
+path = "/run/k3s-kvm-demo/kubeconfig.yaml"
+interval_s = 1
+```
+
+Use a dedicated absolute file path whose parent directory exists and is writable by the dashboard account.
+The dashboard replaces and removes this file, so do not point it at a kubeconfig you maintain yourself.
+For native non-root launches, use a private directory owned by that account.
+For a custom container destination, mount its parent directory read-write, rather than mounting the individual file.
+Remove any old export after changing the configured path.
+
+#### Manual exports
+
 To use host-side `kubectl`, export credentials from a running, configured control plane node with an IP address:
 
 ```bash
-uv run k3s-demo export --output ./k3s-demo.yaml
+sudo podman exec k3s-demo k3s-demo export --output /tmp/k3s-demo.yaml
+sudo podman cp k3s-demo:/tmp/k3s-demo.yaml ./k3s-demo.yaml
+sudo podman exec k3s-demo rm /tmp/k3s-demo.yaml
+sudo chown "$(id -u):$(id -g)" ./k3s-demo.yaml
+chmod 0600 ./k3s-demo.yaml
 kubectl --kubeconfig ./k3s-demo.yaml get nodes
 ```
 
 Without `--output`, the command writes kubeconfig to standard output.
 File output uses permissions `0600` and refuses an existing path.
-The command works with the dashboard running or stopped and does not change `~/.kube/config`.
-Use the same configuration as the dashboard, with `--config` before `export` if needed.
+Choose an unused local destination: `podman cp` can overwrite an existing file.
+The example uses the running Quadlet container, named `k3s-demo`.
+For a stopped dashboard, run `export` with the setup section's `podman run` options and an output-directory mount.
+Native development launches can use `uv run k3s-demo export --output ./k3s-demo.yaml`.
+None of these commands changes `~/.kube/config`.
 
 The dashboard offers **Download kubeconfig** and **Copy kubeconfig**.
 After opening the copy panel, click **Copy to clipboard**.
 If clipboard access is unavailable, copy the selected text manually or use the download button.
 Browser downloads use browser-managed file permissions. Keep the downloaded file private.
 
-The export grants administrator access to the demo cluster. Do not publish it.
-It points to one VM's IP address on the local libvirt network and does not update automatically.
-Export again when you need a fresh configuration.
+All exports grant administrator access to the demo cluster. Do not publish them.
+They point to one VM's IP address on the local libvirt network.
+Manual exports and browser downloads are snapshots. Export again when you need a fresh configuration.
 
 ### Reading a card
 
@@ -284,43 +378,81 @@ and `journalctl -u k3s-demo-prepare.service -u k3s-node.service` when status doe
 The dashboard does not inject retries or kill guest provisioning processes.
 Kill and redeploy a failed demo guest when appropriate.
 
-**One process only.** The app holds a whole-process lock; a second instance
-refuses to start. Run `uvicorn` with a single worker (`k3s-demo serve` does).
+Run one dashboard instance through your chosen launcher, with a single worker (`k3s-demo serve` does this).
+Stop the dashboard before switching launch methods.
 
 [k3s #11349]: https://github.com/k3s-io/k3s/issues/11349
 
 ## Running as a service
 
-`contrib/k3s-demo.service` uses the `k3sdemo` account and an installation at `/opt/k3s-kvm-demo`.
-The account needs write access to `qemu:///system`, usually through the `libvirt` group.
-Install dependencies there with `uv sync --frozen` before starting the service.
-The service executes `/opt/k3s-kvm-demo/.venv/bin/k3s-demo` directly.
-It does not download packages or depend on a user-specific uv cache at startup.
+Install the rootful Quadlet after completing Setup:
 
-Install the configuration at `/etc/k3s-kvm-demo/config.toml`, readable by the service account but not other users.
-Keep `server.lock_path = "/run/k3s-kvm-demo/dashboard.lock"` for both service and manual launches.
-The lock path is absolute and does not depend on the current directory or `XDG_RUNTIME_DIR`.
-Do not run simultaneous instances with different lock paths.
+```bash
+sudo install -d /etc/containers/systemd
+sudo install -m 0644 contrib/k3s-demo.container /etc/containers/systemd/k3s-demo.container
+sudoedit /etc/containers/systemd/k3s-demo.container
+sudo systemctl daemon-reload
+sudo systemctl start k3s-demo.service
+```
 
-`RuntimeDirectory=k3s-kvm-demo` creates the service's runtime directory with the service account's ownership.
-Manual launches need a precreated writable directory, as shown in Setup, or an administrator-managed `systemd-tmpfiles` rule.
-Because `/run` is temporary, manual directory setup must survive or be repeated after a reboot.
-The application does not change directory ownership or host security policy automatically.
-`init-pool` does not create the runtime directory; `check` reports an unusable
-lock path before the dashboard starts.
-No lock-path environment variable is needed.
+Set `Image=` to your local or registry image reference. Match the base-image `Volume=` line to `vm.base_image` on both sides.
+The Quadlet uses host networking and root execution, with a read-only root filesystem and all capabilities dropped.
+`SecurityLabelDisable=true` exempts this container from SELinux label separation; host SELinux and QEMU confinement remain enabled.
+The mounts deliberately omit `:z` and `:Z` to preserve host virtualization labels.
 
-The unit retains `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
-and `NoNewPrivileges=yes`. Keep images outside home directories and provision
-libvirt access and host security labels explicitly. Do not disable these protections to work around setup errors.
+Quadlet generates `k3s-demo.service`. Its `[Install]` section enables boot-time startup; do not run `systemctl enable` on the generated service.
+Use `systemctl stop`, `systemctl restart`, and `journalctl -u k3s-demo.service` for normal operation.
+The application runs one worker. Stopping the dashboard leaves its VMs running.
+Container resource limits apply to the dashboard, not to the VMs managed by host libvirt.
+
+When migrating from the old native service, stop and disable it first.
+Back up its unit and configuration, then remove the installed native unit before reloading systemd.
+
+For application updates, build or pull the selected container image and restart the service.
+If changing the golden image too, extract it to a new path and update both the configuration and Quadlet mount.
+Existing overlays retain their original backing image, so keep old base files until their VMs are removed.
+To roll back, stop the service and restore a compatible previous container image and configuration without deleting VM storage.
 
 `GET /healthz` reports the connection, node count, in-flight work, whether the
 pool marker is present, and any unclassified or orphaned volumes.
 
 ## Development
 
+For native development, install Python build and runtime tools on your development host:
+
+```bash
+# Fedora / RHEL
+sudo dnf install libvirt libvirt-devel gcc pkgconf-pkg-config python3-devel qemu-img xorriso
+# openSUSE
+sudo zypper install libvirt libvirt-devel gcc pkg-config python3-devel qemu-tools xorriso
+uv sync
+```
+
+Native hypervisor access requires authorization to manage system libvirt, often through the `libvirt` group.
+For native development, create a private directory owned by your account and set `kubeconfig_export.path` to an absolute file path inside it.
+Use mode `0700` for the directory before running `check` or `serve`.
+
+Run the unit tests:
+
 ```bash
 uv run pytest
+```
+
+After building the container, check its installed package, assets, bundled image, and seed tooling without accessing host libvirt:
+
+```bash
+sudo podman run --rm -i --network=none --read-only --cap-drop=all \
+  --security-opt=no-new-privileges --security-opt=label=disable \
+  --tmpfs /tmp:rw,mode=1777 --entrypoint python \
+  localhost/k3s-kvm-demo:latest - < tests/container_smoke.py
+```
+
+This check runs against the installed image with no source mount or mocked Podman calls.
+It does not verify guest boot or host permissions. Validate those on the booth host using the event checks below.
+To inspect Quadlet generation before installation:
+
+```bash
+QUADLET_UNIT_DIRS="$PWD/contrib" /usr/lib/systemd/system-generators/podman-system-generator --dryrun
 ```
 
 The default suite exercises libvirt through its built-in `test:///default` driver:
@@ -338,14 +470,16 @@ Where things live:
 | `config.py` | TOML loading and validation; every error names its key |
 | `meta.py` | Durable state in domain metadata; the only caller of `setMetadata` |
 | `domxml.py` | Domain and volume XML, built with ElementTree |
-| `conn.py` | The singleton lock and leased libvirt connections |
+| `conn.py` | Leased libvirt connections |
 | `pool.py` | Pool ownership, volume classification, disk-reference checks |
 | `libvirtctl.py` | Two-volume creation, scoped ownership, idempotent deletion |
 | `guestexec.py` | The guest-agent protocol and QGA implementation |
 | `k3sconf.py` | Per-node k3s configuration |
 | `seed.py` | Seed payload, ISO creation, and libvirt upload |
 | `observer.py` | Bounded guest status polling, durable startup history, fresh join evidence |
-| `firstboot/` | Guest preparation command and the two installed systemd units |
+| `image/` | KIWI description, configuration hook, guest command, and systemd units |
+| `Containerfile` | Installed dashboard runtime and bundled golden image |
+| `contrib/k3s-demo.container` | Rootful Podman Quadlet for the booth host |
 | `cluster.py` | Kubernetes-side housekeeping and kubeconfig export |
 | `stats.py` | Extension point for resource metrics and Kubernetes readiness |
 
@@ -376,9 +510,12 @@ Complete these checks on the booth hypervisor with the golden image intended for
 9. Stop k3s inside a configured guest. Confirm startup history remains configured while current service status changes.
 10. Stop QGA temporarily. Confirm service evidence becomes unknown and new joins are blocked without deleting or restarting existing guests.
 11. Reboot a guest. Confirm its hostname and machine ID remain stable, and that preparation preserves the installed configuration.
-12. Confirm unattended boot from an empty machine ID file. Compare two clones' generated IDs and DHCP leases for distinct values.
+12. Confirm unattended boot from the KIWI image's initial machine-ID state. Compare two clones' generated IDs and DHCP leases for distinct values.
 13. Inspect both guest units with `systemd-analyze verify` in the built image. Confirm readiness notification precedes the `started` marker.
 14. Test interrupted creation and deletion on a disposable host. Confirm recovery deletes only volumes with matching ownership claims.
 15. Check legacy metadata on a disposable host. Confirm v2 refuses startup without changing domains or automatically resetting anything.
 16. Check deletion with multiple demo nodes sharing the standalone base. Confirm an unrelated source-only qcow2 definition does not block cleanup.
 17. On a disposable host, confirm visible foreign references and incomplete backing evidence in managed peers block volume deletion.
+18. With the Quadlet, verify loopback-only HTTP access, container restart, host reboot, and reconnect after libvirt socket recreation.
+19. Confirm stopping the service removes the exported kubeconfig and leaves no dashboard container running.
+20. With host SELinux enforcing, deploy two guests sharing the extracted base, then Reset. Confirm host QEMU can read the base throughout.

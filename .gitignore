@@ -7,3 +7,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+# Local VM images, exported credentials, editor backups, and tooling caches.
+*.qcow2
+*.raw
+/k3s-demo.yaml
+*~
+.ruff_cache/

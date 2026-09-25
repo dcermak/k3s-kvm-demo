@@ -11,7 +11,6 @@ import ipaddress
 import json
 import os
 import shutil
-import stat
 import subprocess
 import tomllib
 from dataclasses import dataclass, field
@@ -35,7 +34,6 @@ class ServerConfig:
     bind: str = "127.0.0.1"
     port: int = 8000
     allowed_hosts: tuple[str, ...] = ("127.0.0.1:8000", "localhost:8000")
-    lock_path: Path = Path("/run/k3s-kvm-demo/dashboard.lock")
 
 
 @dataclass(frozen=True)
@@ -82,6 +80,12 @@ class MaintenanceConfig:
 
 
 @dataclass(frozen=True)
+class KubeconfigExportConfig:
+    path: Path = Path("/run/k3s-kvm-demo/kubeconfig.yaml")
+    interval_s: int = 1
+
+
+@dataclass(frozen=True)
 class Config:
     server: ServerConfig
     libvirt: LibvirtConfig
@@ -90,6 +94,7 @@ class Config:
     observation: ObservationConfig
     maintenance: MaintenanceConfig
     source: Path | None = field(default=None, compare=False)
+    kubeconfig_export: KubeconfigExportConfig = field(default_factory=KubeconfigExportConfig)
 
 
 def _section(raw: dict, name: str) -> dict:
@@ -157,6 +162,10 @@ def from_mapping(raw: dict, *, source: Path | None = None) -> Config:
     cluster = _load_cluster(_section(raw, "cluster"))
     observation = _load_observation(_section(raw, "observation"))
     maintenance = _load_maintenance(_section(raw, "maintenance"))
+    export = _section(raw, "kubeconfig_export")
+    export_path = export.get("path", str(KubeconfigExportConfig.path))
+    if not isinstance(export_path, str) or not Path(export_path).is_absolute():
+        raise ConfigError("kubeconfig_export.path", "must be an absolute file path")
     return Config(
         server=server,
         libvirt=libvirt_cfg,
@@ -165,6 +174,10 @@ def from_mapping(raw: dict, *, source: Path | None = None) -> Config:
         observation=observation,
         maintenance=maintenance,
         source=source,
+        kubeconfig_export=KubeconfigExportConfig(
+            path=Path(export_path),
+            interval_s=_positive_int(export, "kubeconfig_export", "interval_s", 1),
+        ),
     )
 
 
@@ -190,69 +203,19 @@ def _load_server(section: dict) -> ServerConfig:
     )
     if not hosts:
         raise ConfigError("server.allowed_hosts", "must list at least one host")
-    lock_path = section.get("lock_path", str(ServerConfig.lock_path))
-    if not isinstance(lock_path, str) or not Path(lock_path).is_absolute():
-        raise ConfigError(
-            "server.lock_path", "must be an absolute path shared by all launch methods"
-        )
-    return ServerConfig(bind=bind, port=port, allowed_hosts=hosts, lock_path=Path(lock_path))
+    return ServerConfig(bind=bind, port=port, allowed_hosts=hosts)
 
 
-def validate_lock_path(lock_path: Path) -> None:
-    """Check that the current account can create and use the server lock.
-
-    The runtime-directory owner, rather than this application, creates the
-    parent.  For example, systemd's ``RuntimeDirectory=`` creates it for the
-    service account.  This check deliberately does not acquire the lock: a
-    running dashboard is not a configuration error.
-    """
-    parent = lock_path.parent
-    try:
-        parent_stat = parent.stat()
-    except FileNotFoundError as exc:
-        raise ConfigError(
-            "server.lock_path",
-            f"parent directory {parent} does not exist; create it for the account that runs "
-            "the dashboard",
-        ) from exc
-    except OSError as exc:
-        raise ConfigError(
-            "server.lock_path", f"cannot access parent directory {parent}: {exc}"
-        ) from exc
-    if not stat.S_ISDIR(parent_stat.st_mode):
-        raise ConfigError("server.lock_path", f"parent path {parent} is not a directory")
-    try:
-        parent_usable = os.access(parent, os.W_OK | os.X_OK, effective_ids=True)
-    except OSError as exc:
-        raise ConfigError(
-            "server.lock_path", f"cannot access parent directory {parent}: {exc}"
-        ) from exc
-    if not parent_usable:
-        raise ConfigError(
-            "server.lock_path",
-            f"parent directory {parent} is not writable and searchable by this account",
-        )
-    try:
-        lock_stat = lock_path.stat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise ConfigError(
-            "server.lock_path", f"cannot access lock path {lock_path}: {exc}"
-        ) from exc
-    if not stat.S_ISREG(lock_stat.st_mode):
-        raise ConfigError("server.lock_path", f"lock path {lock_path} is not a regular file")
-    try:
-        lock_usable = os.access(lock_path, os.R_OK | os.W_OK, effective_ids=True)
-    except OSError as exc:
-        raise ConfigError(
-            "server.lock_path", f"cannot access lock path {lock_path}: {exc}"
-        ) from exc
-    if not lock_usable:
-        raise ConfigError(
-            "server.lock_path",
-            f"lock path {lock_path} is not readable and writable by this account",
-        )
+def validate_export_path(cfg: Config) -> None:
+    """The export parent is provisioned by the operator, including in containers."""
+    path = cfg.kubeconfig_export.path
+    key = "kubeconfig_export.path"
+    if not path.is_absolute():
+        raise ConfigError(key, "must be an absolute file path")
+    if not path.parent.is_dir() or not os.access(path.parent, os.W_OK | os.X_OK):
+        raise ConfigError(key, f"parent directory {path.parent} must exist and be writable")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ConfigError(key, "destination must be a regular file, not a symlink or directory")
 
 
 def _load_libvirt(section: dict) -> LibvirtConfig:

@@ -1,8 +1,7 @@
 # Real-VM integration test
 
-> **Guest boot remains unverified.** This opt-in test has not been run against
-> the v2 image. Collection and a skipped test are not evidence of successful VM boot,
-> systemd startup, Kubernetes readiness, or live cleanup.
+This test requires an explicit VM opt-in. A skipped test is not evidence of successful guest boot,
+systemd startup, Kubernetes readiness, or live cleanup.
 
 This opt-in test boots one server and one agent from a supplied v2 golden image.
 It uses `ConnectionManager`, `NodeManager`, seed ISO upload, and `Observer` without mocks.
@@ -19,10 +18,10 @@ Both pods must exit successfully, and both containerd processes must report umas
 
 - Use a disposable local KVM test host with access to `qemu:///system`, `qemu-img`, and `xorriso`.
 - Install `kubectl` on the host's `PATH`. The host must reach the guests' API port, TCP 6443.
-- Supply an image built from this revision's `scripts/build-image.sh` at a new path, outside the test pool directory.
+- Supply an image built from this revision's `image/` KIWI description at a new path, outside the test pool directory.
 - Supply a digest-pinned Python 3 probe image through `K3S_DEMO_TEST_PROBE_IMAGE`.
 - The golden image must be standalone qcow2, with no backing file of its own.
-- The image's virtual size must not exceed 20 GiB. Each test VM uses two virtual CPUs and 2 GiB of memory.
+- The image's virtual size must not exceed 24 GiB. Each test VM uses four virtual CPUs and 4 GiB of memory.
 - Supply an existing active libvirt network dedicated to testing, with DHCP and guest-to-guest connectivity.
 - Supply an existing empty directory reserved for this run. It must not overlap any registered storage pool or existing domain disk reference.
 - Provision filesystem permissions and host security labels for libvirt/QEMU before running. The test does not change host security policy.
@@ -33,11 +32,16 @@ Do not use `/var/lib/libvirt/images` or a subdirectory if an existing pool alrea
 The test does not create, stop, redefine, or delete the supplied network.
 Legacy domain metadata blocks the test just as it blocks the dashboard. The test never resets legacy guests.
 
-The builder defaults to `/var/lib/libvirt/images/k3s-base-v2.qcow2`.
-It publishes the completed image atomically and refuses to overwrite an existing output.
-Use another unused `OUTPUT` path for each rebuild. The selected output directory must already exist and be writable.
-The image contains an empty `/etc/machine-id`, with the D-Bus machine ID and random seed removed.
-PID 1 generates the clone's identity without interactive first-boot setup or first-boot presets.
+Build with the boxbuild plugin from `image/`:
+
+```bash
+kiwi-ng system boxbuild --box=tumbleweed -- kiwi --description . --target-dir /var/tmp/kiwi/
+```
+
+Copy the completed qcow2 to an unused host path and set `K3S_DEMO_TEST_IMAGE` to that path.
+Never overwrite a base image used by existing overlays.
+The KIWI configuration hook initializes the machine-ID state and enables first-boot setup.
+The test checks the installed guest command against `image/k3s-demo-guest` in this checkout.
 
 ## Probe image
 
@@ -149,7 +153,7 @@ It does not prove crash consistency or all systemd failure and recovery behavior
 Before a release, also complete the main README's **Before the event** checklist on a disposable host.
 That includes dashboard termination during preparation, QGA outages, guest and host reboots,
 machine ID uniqueness, current service failure after historical success, and legacy metadata refusal.
-Confirm unattended PID 1 startup from the empty machine ID file, without interactive setup or presets changing the guest units.
+Confirm unattended startup from the KIWI image's initial machine-ID state and verify the intended guest units remain enabled.
 Check multi-node deletion alongside an unrelated source-only qcow2 guest.
 On a disposable host, check refusal for visible foreign references and incomplete backing evidence in managed peers.
 Run `systemd-analyze verify` for both guest units inside the built image, where their executable paths and dependencies exist.

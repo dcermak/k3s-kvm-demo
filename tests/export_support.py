@@ -58,7 +58,6 @@ FAILURES = [
 def config_values(config_values, tmp_path):
     values = copy.deepcopy(config_values)
     values["vm"]["max_nodes"] = 8
-    values["server"]["lock_path"] = str(tmp_path / "dashboard.lock")
     return values
 
 

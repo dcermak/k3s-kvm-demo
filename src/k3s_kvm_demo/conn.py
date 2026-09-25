@@ -1,4 +1,4 @@
-"""Singleton process lock and a leased libvirt connection.
+"""A leased libvirt connection.
 
 Two problems this solves.
 
@@ -15,15 +15,11 @@ cannot block the two-second poller.
 
 from __future__ import annotations
 
-import errno
-import fcntl
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TypeVar
 
 import libvirt
@@ -45,65 +41,6 @@ RECONNECT_CODES = frozenset(
 
 def is_connection_lost(exc: libvirt.libvirtError) -> bool:
     return exc.get_error_code() in RECONNECT_CODES
-
-
-class AlreadyRunning(Exception):
-    """Another instance holds the singleton lock."""
-
-
-def default_lock_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / "k3s-kvm-demo.lock"
-    return Path(f"/tmp/k3s-kvm-demo-{os.getuid()}.lock")
-
-
-class SingletonLock:
-    """Whole-process advisory lock.
-
-    The job table, provisioning generations and reconciliation are per-process,
-    so a second instance would corrupt them.  Checking an environment variable
-    would not stop a stray manual launch; an ``flock`` held for the process
-    lifetime does.
-    """
-
-    def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path) if path is not None else default_lock_path()
-        self._fd: int | None = None
-
-    def acquire(self) -> None:
-        if self._fd is not None:
-            return
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(fd)
-            if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise AlreadyRunning(
-                    f"another k3s-kvm-demo instance holds {self.path}. "
-                    "Only one process may manage the demo cluster."
-                ) from exc
-            raise
-        os.truncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        self._fd = fd
-
-    def release(self) -> None:
-        if self._fd is None:
-            return
-        try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
-        finally:
-            os.close(self._fd)
-            self._fd = None
-
-    def __enter__(self) -> SingletonLock:
-        self.acquire()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.release()
 
 
 class ConnectionManager:

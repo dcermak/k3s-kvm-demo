@@ -13,7 +13,7 @@ import libvirt
 
 from . import config as configmod
 from . import cluster, guestexec, meta, pool as poolmod
-from .conn import AlreadyRunning, ConnectionManager
+from .conn import ConnectionManager
 from .libvirtctl import NodeManager
 
 DEFAULT_CONFIG = "config.toml"
@@ -84,7 +84,7 @@ def cmd_init_pool(cfg: configmod.Config, path: str | None) -> int:
 
 def cmd_check(cfg: configmod.Config) -> int:
     try:
-        configmod.validate_lock_path(cfg.server.lock_path)
+        configmod.validate_export_path(cfg)
     except configmod.ConfigError as exc:
         return _fail(exc, 1)
     with _connect(cfg) as conn:
@@ -129,7 +129,7 @@ def cmd_serve(cfg: configmod.Config) -> int:
 
     from .app import build_state, create_app
 
-    configmod.validate_lock_path(cfg.server.lock_path)
+    configmod.validate_export_path(cfg)
     with _connect(cfg) as conn:
         for warning in configmod.validate_hypervisor(conn, cfg):
             log.warning("%s", warning)
@@ -155,8 +155,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(cfg)
     except configmod.ConfigError as exc:
         return _fail(exc, 2)
-    except AlreadyRunning as exc:
-        return _fail(exc, 3)
     except (meta.CompatibilityError, poolmod.PoolError) as exc:
         return _fail(exc, 2)
     except libvirt.libvirtError as exc:

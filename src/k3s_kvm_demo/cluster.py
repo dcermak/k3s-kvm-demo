@@ -33,7 +33,9 @@ class KubeconfigExportError(Exception):
     """Kubeconfig could not be retrieved or parsed."""
 
 
-def export_kubeconfig(nodes: list[Node], agent_factory: Callable[[str], Agent]) -> str:
+def export_kubeconfig(
+    nodes: list[Node], agent_factory: Callable[[str], Agent], *, poll_interval_s: float = 2.0,
+) -> str:
     """Export one server's credentials with its host-reachable API address."""
     try:
         server = pick_server([node for node in nodes if node.ip])
@@ -45,6 +47,7 @@ def export_kubeconfig(nodes: list[Node], agent_factory: Callable[[str], Agent]) 
             "/usr/bin/timeout",
             ["10", "/bin/cat", KUBECONFIG],
             timeout_s=COMMAND_TIMEOUT_S,
+            interval_s=poll_interval_s,
         )
     except (
         guestexec.AgentUnavailable, guestexec.AgentError, guestexec.ExecTimeout,

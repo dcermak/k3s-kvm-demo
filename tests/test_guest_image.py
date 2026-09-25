@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,8 +14,8 @@ import pytest
 from k3s_kvm_demo import seed
 from k3s_kvm_demo.observer import parse_guest_status
 
-FIRSTBOOT = Path(__file__).resolve().parents[1] / "firstboot"
-SCRIPT = FIRSTBOOT / "k3s-demo-guest"
+IMAGE = Path(__file__).resolve().parents[1] / "image"
+SCRIPT = IMAGE / "k3s-demo-guest"
 UUID = "12345678-1234-1234-1234-123456789abc"
 CONFIG = b'{"node-name":"node-a","token":"$(touch /not-executed)"}\n'
 
@@ -121,8 +119,8 @@ def test_shell_syntax():
 
 
 def test_units_declare_prepare_before_k3s():
-    prepare = (FIRSTBOOT / "k3s-demo-prepare.service").read_text()
-    node = (FIRSTBOOT / "k3s-node.service").read_text()
+    prepare = (IMAGE / "k3s-demo-prepare.service").read_text()
+    node = (IMAGE / "k3s-node.service").read_text()
     assert "Type=oneshot\nRemainAfterExit=yes" in prepare
     assert "ExecStart=/usr/local/libexec/k3s-demo-guest prepare" in prepare
     assert "Requires=k3s-demo-prepare.service" in node
@@ -388,175 +386,3 @@ def test_status_reports_prepare_failure_and_bounds_systemctl_output(harness):
     assert status["prepare_state"] == "failed"
     assert status["k3s_state"] == "unknown"
     assert status["error_code"] == "prepare-failed"
-
-
-BUILD_SHIM = """import json
-import os
-import sys
-from pathlib import Path
-
-name = Path(sys.argv[0]).name
-args = sys.argv[1:]
-with open(os.environ['BUILD_CALLS'], 'a') as log:
-    log.write(json.dumps([name, *args]) + '\\n')
-if name == 'curl':
-    Path(args[args.index('-o') + 1]).write_bytes(b'new image')
-elif name == 'virt-customize':
-    race = os.environ.get('BUILD_RACE')
-    output = Path(os.environ['OUTPUT'])
-    if race == 'file':
-        output.write_bytes(b'other builder image')
-    elif race == 'symlink':
-        output.symlink_to(os.environ['BUILD_OLD_IMAGE'])
-    elif race == 'directory-symlink':
-        output.symlink_to(os.environ['BUILD_OLD_DIRECTORY'], target_is_directory=True)
-elif name == 'install':
-    if os.environ.get('BUILD_FAIL_INSTALL'):
-        Path(args[-1]).write_bytes(b'partial copy')
-        sys.exit(1)
-    os.execv('/usr/bin/install', ['install', *args])
-"""
-
-
-@pytest.fixture
-def builder(tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    output_dir = tmp_path / "output directory"
-    output_dir.mkdir()
-    output = output_dir / "base image.qcow2"
-    calls = tmp_path / "build-calls"
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    for command in ("curl", "qemu-img", "virt-customize", "install"):
-        shim = bin_dir / command
-        shim.write_text(f"#!{sys.executable}\n" + BUILD_SHIM)
-        shim.chmod(0o755)
-
-    def run(**env):
-        return subprocess.run(
-            ["bash", str(FIRSTBOOT.parent / "scripts/build-image.sh")],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                **os.environ,
-                "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "OUTPUT": str(output),
-                "BUILD_CALLS": str(calls),
-                "TMPDIR": str(scratch),
-                "ROOT_PASSWORD": "",
-                **env,
-            },
-        )
-
-    return run, output, calls, scratch
-
-
-@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling-symlink"])
-def test_builder_rejects_existing_output_before_download(builder, tmp_path, kind):
-    run, output, calls, scratch = builder
-    old_image = tmp_path / "old-image"
-    old_image.write_bytes(b"old image")
-    if kind == "file":
-        output.write_bytes(b"old image")
-    elif kind == "directory":
-        output.mkdir()
-    else:
-        output.symlink_to(old_image if kind == "symlink" else tmp_path / "missing")
-    result = run()
-    assert result.returncode != 0
-    assert "Refusing to overwrite" in result.stderr
-    assert not calls.exists()
-    assert old_image.read_bytes() == b"old image"
-    if kind == "file":
-        assert output.read_bytes() == b"old image"
-    elif kind.endswith("symlink"):
-        assert output.is_symlink()
-    assert not list(scratch.iterdir())
-
-
-def test_builder_rejects_missing_output_directory_before_download(builder):
-    run, output, calls, _scratch = builder
-    result = run(OUTPUT=str(output.parent / "missing" / "image.qcow2"))
-    assert result.returncode != 0
-    assert "Output directory must exist and be writable" in result.stderr
-    assert not calls.exists()
-
-
-@pytest.mark.parametrize("race", ["file", "symlink", "directory-symlink"])
-def test_builder_publication_never_clobbers_racing_output(builder, tmp_path, race):
-    run, output, _calls, scratch = builder
-    old_image = tmp_path / "old-image"
-    old_image.write_bytes(b"old image")
-    old_directory = tmp_path / "old-directory"
-    old_directory.mkdir()
-    result = run(
-        BUILD_RACE=race,
-        BUILD_OLD_IMAGE=str(old_image),
-        BUILD_OLD_DIRECTORY=str(old_directory),
-    )
-    assert result.returncode != 0
-    assert old_image.read_bytes() == b"old image"
-    assert not list(old_directory.iterdir())
-    if race == "file":
-        assert output.read_bytes() == b"other builder image"
-    else:
-        assert output.is_symlink()
-    assert list(output.parent.iterdir()) == [output]
-    assert not list(scratch.iterdir())
-
-
-def test_builder_cleans_partial_staging_file(builder):
-    run, output, _calls, scratch = builder
-    result = run(BUILD_FAIL_INSTALL="1")
-    assert result.returncode != 0
-    assert not output.exists()
-    assert not list(output.parent.iterdir())
-    assert not list(scratch.iterdir())
-
-
-@pytest.mark.parametrize("dbus_alias", [False, True])
-def test_builder_publishes_image_and_leaves_empty_machine_id(builder, tmp_path, dbus_alias):
-    run, output, calls, scratch = builder
-    result = run()
-    assert result.returncode == 0, result.stderr
-    assert output.read_bytes() == b"new image"
-    assert output.stat().st_mode & 0o777 == 0o644
-    assert list(output.parent.iterdir()) == [output]
-    assert not list(scratch.iterdir())
-    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
-    customize = next(args for command, *args in invocations if command == "virt-customize")
-    commands = [customize[i + 1] for i, arg in enumerate(customize) if arg == "--run-command"]
-    reset = next(command for command in commands if "/var/lib/dbus/machine-id" in command)
-    assert reset == (
-        "rm -f /var/lib/dbus/machine-id /etc/machine-id /var/lib/systemd/random-seed "
-        "&& install -m 0644 /dev/null /etc/machine-id"
-    )
-    assert "systemctl enable k3s-node.service" in commands
-    assert "systemctl mask k3s.service k3s-server.service k3s-agent.service" in commands
-    assert "mkdir -p /etc/cloud; touch /etc/cloud/cloud-init.disabled" in commands
-    assert not any("systemctl preset" in command for command in commands)
-    # Execute only the identity-reset command, with every guest path redirected.
-    root = tmp_path / "guest"
-    for path in ("etc", "var/lib/dbus", "var/lib/systemd"):
-        (root / path).mkdir(parents=True)
-    protected = root / "protected"
-    protected.write_bytes(b"do not truncate")
-    (root / "etc/machine-id").symlink_to(protected)
-    dbus_id = root / "var/lib/dbus/machine-id"
-    if dbus_alias:
-        dbus_id.symlink_to(root / "etc/machine-id")
-    else:
-        dbus_id.write_text("stale dbus ID\n")
-    random_seed = root / "var/lib/systemd/random-seed"
-    random_seed.write_bytes(b"stale random seed")
-    for path in ("/var/lib/dbus/machine-id", "/etc/machine-id", "/var/lib/systemd/random-seed"):
-        reset = reset.replace(path, f"'{root}{path}'")
-    subprocess.run(["/bin/sh", "-c", reset], check=True)
-    assert (root / "etc/machine-id").read_bytes() == b""
-    assert not (root / "etc/machine-id").is_symlink()
-    assert (root / "etc/machine-id").stat().st_mode & 0o777 == 0o644
-    assert not dbus_id.exists() and not dbus_id.is_symlink()
-    assert not random_seed.exists()
-    assert protected.read_bytes() == b"do not truncate"

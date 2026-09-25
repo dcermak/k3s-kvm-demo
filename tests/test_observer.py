@@ -21,7 +21,7 @@ from k3s_kvm_demo.observer import (
 )
 
 from .conftest import fake_libvirt_error
-from .test_firstboot import UUID as GUEST_UUID, harness as harness
+from .test_guest_image import UUID as GUEST_UUID, harness as harness
 
 
 def status_text(uuid, **changes):

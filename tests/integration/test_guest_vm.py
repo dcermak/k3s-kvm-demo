@@ -104,9 +104,9 @@ def vm_cluster():
                 "base_image": str(image.resolve()),
                 "name_prefix": scope,
                 "max_nodes": 2,
-                "disk_gb": 20,
-                "memory_mb": 2048,
-                "vcpus": 2,
+                "disk_gb": 24,
+                "memory_mb": 4096,
+                "vcpus": 4,
             },
             "cluster": {"token": secrets.token_hex(32)},
             "observation": {"interval_s": 2, "qga_timeout_s": 2, "stale_after_s": 30},
@@ -321,7 +321,7 @@ def test_server_and_agent_boot_from_seed(vm_cluster, tmp_path):
         else:
             pytest.fail(f"guest did not become configured and active within 600 s: {current}")
 
-        wrapper = Path(__file__).resolve().parents[2] / "firstboot/k3s-demo-guest"
+        wrapper = Path(__file__).resolve().parents[2] / "image/k3s-demo-guest"
         expected_hash = hashlib.sha256(wrapper.read_bytes()).hexdigest()
         result = guestexec.run(
             guestexec.QemuAgent(manager.cm, node.uuid, timeout_s=2),

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import copy
-import os
 import subprocess
 from dataclasses import fields
-from pathlib import Path
 
 import pytest
 
@@ -51,63 +49,6 @@ def test_bind_must_be_loopback(config_values):
     for good in ("127.0.0.1", "::1", "localhost"):
         values["server"]["bind"] = good
         assert load(values).server.bind == good
-
-
-def test_lock_path_readiness_rejects_non_directory_parent(tmp_path):
-    parent = tmp_path / "not-a-directory"
-    parent.write_text("file")
-    with pytest.raises(configmod.ConfigError) as excinfo:
-        configmod.validate_lock_path(parent / "dashboard.lock")
-    assert excinfo.value.key == "server.lock_path"
-    assert "not a directory" in str(excinfo.value)
-
-
-def test_lock_path_readiness_rejects_non_regular_lock_path(tmp_path):
-    lock_path = tmp_path / "dashboard.lock"
-    lock_path.mkdir()
-    with pytest.raises(configmod.ConfigError) as excinfo:
-        configmod.validate_lock_path(lock_path)
-    assert excinfo.value.key == "server.lock_path"
-    assert "not a regular file" in str(excinfo.value)
-
-
-def test_lock_path_readiness_requires_an_existing_lock_to_be_readable_and_writable(
-    tmp_path, monkeypatch
-):
-    lock_path = tmp_path / "dashboard.lock"
-    lock_path.touch()
-    real_access = os.access
-
-    def access(path, mode, *, effective_ids):
-        if Path(path) == lock_path and mode == os.R_OK | os.W_OK:
-            return False
-        return real_access(path, mode, effective_ids=effective_ids)
-
-    monkeypatch.setattr(configmod.os, "access", access)
-
-    with pytest.raises(configmod.ConfigError) as excinfo:
-        configmod.validate_lock_path(lock_path)
-
-    assert excinfo.value.key == "server.lock_path"
-    assert "not readable and writable" in str(excinfo.value)
-
-
-def test_lock_path_readiness_wraps_filesystem_inspection_errors(tmp_path, monkeypatch):
-    lock_path = tmp_path / "dashboard.lock"
-    real_stat = Path.stat
-
-    def stat_error(path, *args, **kwargs):
-        if path == lock_path:
-            raise PermissionError("permission denied")
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", stat_error)
-
-    with pytest.raises(configmod.ConfigError) as excinfo:
-        configmod.validate_lock_path(lock_path)
-
-    assert excinfo.value.key == "server.lock_path"
-    assert "cannot access lock path" in str(excinfo.value)
 
 
 def test_disk_must_hold_the_base_image(config_values):

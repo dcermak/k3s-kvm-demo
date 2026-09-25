@@ -1,0 +1,51 @@
+---
+name: Build deployment image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/dcermak/k3s-kvm-demo
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils podman python3-venv
+          pip install --user kiwi kiwi-boxed-plugin
+
+      - name: Build guest image
+        working-directory: image
+        run: |
+          kiwi-ng system boxbuild --box=tumbleweed -- kiwi --description ./image/ --target-dir /var/tmp/kiwi/
+          cp /var/tmp/kiwi/*.qcow2 "$GITHUB_WORKSPACE/k3s-image.qcow2"
+
+      - name: Build container
+        run: podman build --pull=always --tag "$IMAGE:latest" --file Containerfile .
+
+      - name: Publish container
+        if: >-
+          github.repository == 'dcermak/k3s-kvm-demo' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'schedule')
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$REGISTRY_PASSWORD" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          build_tag="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          podman tag "$IMAGE:latest" "$IMAGE:$build_tag"
+          podman push "$IMAGE:$build_tag"
+          podman push "$IMAGE:latest"
