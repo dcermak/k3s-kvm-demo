@@ -3,47 +3,58 @@
 This opt-in test boots one server and one worker, verifies Kubernetes readiness and workload behavior, and removes its resources.
 A skipped run does not verify guest behavior.
 
-## Requirements
-
-- A disposable local KVM host with access to `qemu:///system`, `qemu-img`, and `xorriso`.
-- Host `kubectl` and connectivity to the guests' API port, TCP 6443.
-- A [guest image built from this checkout](../../image/Readme.md#building-the-guest), at an absolute path outside the test pool.
-  It must be standalone qcow2, at most 24 GiB virtual size. The installed guest wrapper must match the checkout's SHA-256 digest.
-- Capacity for two VMs, each with four virtual CPUs and 4 GiB RAM.
-- An existing dedicated, active libvirt network with DHCP and guest-to-guest connectivity.
-- An existing empty directory reserved for this run, with an absolute, symlink-free path.
-  It must not overlap any registered storage pool or existing domain disk reference.
-- Host permissions and security labels allowing QEMU access. The test does not change host security policy.
-- A digest-pinned Python 3 probe image as described below.
-
-For example, reserve `/var/lib/k3s-demo-vm-tests`. Avoid `/var/lib/libvirt/images` if an existing pool covers it.
-The supplied network is left unchanged. Legacy application metadata blocks the test without resetting existing guests.
-
-### Probe image
-
-Use an image with `/usr/local/bin/python3`, the standard library, and `/tmp` writable by UID/GID `10001`.
-An official `python:3.13-slim` image resolved to a digest for the guest architecture meets these requirements.
-Set `PROBE_IMAGE_BY_DIGEST` to its full `registry/repository@sha256:<64 hexadecimal characters>` reference. Tags alone are rejected.
-
-Both guests need registry access. Offline runs require the pinned probe image and k3s system images cached before the probes start.
-For unattended offline runs, include a k3s air-gap image archive in the golden image.
-Image-pull failures indicate setup problems.
-
 ## Running
 
-From the repository root, substitute your image path, reserved directory, and existing network:
+From the repository root:
 
 ```bash
-K3S_DEMO_VM_TESTS=1 \
-K3S_DEMO_TEST_IMAGE=/var/lib/libvirt/images/k3s-base-v2.qcow2 \
-K3S_DEMO_TEST_POOL_PATH=/var/lib/k3s-demo-vm-tests \
-K3S_DEMO_TEST_NETWORK=k3s-demo-test \
-K3S_DEMO_TEST_PROBE_IMAGE="$PROBE_IMAGE_BY_DIGEST" \
-uv run pytest tests/integration -s
+K3S_DEMO_VM_TESTS=1 uv run pytest tests/integration -s
 ```
 
 The test is skipped without `K3S_DEMO_VM_TESTS=1`.
+It uses these defaults. Set an environment variable to override a value:
 
+| Environment variable | Default | Override requirements |
+| --- | --- | --- |
+| `K3S_DEMO_TEST_IMAGE` | `k3s-image.qcow2` in the repository root | Existing absolute path to a guest image built from this checkout |
+| `K3S_DEMO_TEST_NETWORK` | `default` | Existing active libvirt network |
+| `K3S_DEMO_TEST_POOL_PATH` | Unique directory created under `/var/tmp`, named `k3sit-<random>` | Existing empty directory with an absolute, symlink-free path |
+| `K3S_DEMO_TEST_PROBE_IMAGE` | `registry.opensuse.org/opensuse/bci/python:3.13` | Python 3 image reference, using a tag or digest |
+
+## Requirements
+
+- A disposable local KVM host with access to `qemu:///system`, `qemu-img`, `xorriso`, and GNU `cp`.
+- Host `kubectl` and connectivity to the guests' API port, TCP 6443.
+- A [guest image built from this checkout](../../image/Readme.md#building-the-guest), at an absolute path outside the test pool.
+  It must be standalone qcow2, at most 24 GiB virtual size. The installed guest wrapper must match the checkout's SHA-256 digest.
+  The source must be readable by the test user.
+- Capacity for two VMs, each with four virtual CPUs and 4 GiB RAM.
+- An existing active libvirt network with DHCP and guest-to-guest connectivity.
+- Write access to `/var/tmp` for staging the guest image and creating the automatic pool directory.
+  Image staging also uses `/var/tmp` when `K3S_DEMO_TEST_POOL_PATH` supplies a custom pool directory.
+  Both directories must not overlap any registered storage pool or existing domain disk reference.
+  Allow space for one guest-image copy when the filesystem cannot use a reflink.
+- Host permissions and security labels allowing QEMU access. The test does not change host security policy.
+- On SELinux hosts, permission to label automatic directories using the context of `/var/lib/libvirt/images`.
+- Registry access from both guests, or cached probe and k3s system images as described below.
+
+### SELinux storage labels
+
+The test labels new directories using the SELinux context of `/var/lib/libvirt/images`, in both enforcing and permissive mode.
+Setup fails if this label cannot be applied. Explicitly supplied pool directories must already have suitable labels.
+
+### Probe image
+
+The probe runs `python3` through the container's `PATH` and uses only the Python standard library.
+The image must support user and group IDs `10001`, including write access to `/tmp`.
+
+For a reproducible image selection, set `K3S_DEMO_TEST_PROBE_IMAGE` to a `registry/repository@sha256:<digest>` reference for the guest architecture.
+The test prints the requested reference and each successful probe pod's `imageID`.
+It uses `imagePullPolicy: IfNotPresent`, so a cached image can satisfy a tagged reference.
+
+Offline runs require the selected probe image and k3s system images cached in both guests before the probes start.
+For unattended offline runs, include a k3s air-gap image archive in the golden image.
+Image-pull failures indicate setup problems.
 
 ## Results and diagnostics
 
@@ -61,16 +72,15 @@ Probe pods have a 240 s deadline; the host waits up to 300 s. DNS and CoreDNS ch
 
 On probe failure, output includes pod status, events, available logs, and CoreDNS diagnostics.
 Wrapper hashes and umasks are printed; credentials are not collected.
-For old-versus-corrected image comparisons, follow [regression verification](../../docs/development.md#verifying-the-guest-umask-regression).
-Complete the [release checks](../../docs/development.md#release-checks) separately for interruption and recovery behavior.
 
 ## Cleanup
 
 Each run creates a unique `k3sit-` pool and node prefix, generates a disposable token, and ignores the user's `config.toml`.
-A directory lock prevents concurrent test runs. The fixture prints pool and domain identities and cleans only its own scope.
-After removing nodes and volumes, it removes its marker and undefines the pool, leaving the supplied directory in place.
+The pool-directory lock prevents sharing that directory between runs. Runs with separate directories can execute concurrently.
+Cleanup removes test nodes, volumes, the pool, the staged image, and automatically created directories. An explicitly supplied pool directory remains.
 
-Cleanup runs after ordinary assertion failures. Unexpected volumes, ownership changes, or blocking disk references preserve resources for inspection.
+Unexpected volumes, ownership changes, blocking disk references, or uncertain pool operations preserve resources for inspection.
+The staged image is removed only after confirmed teardown. Directories are removed with `rmdir`, without recursive deletion.
 See [deletion rules](../../docs/development.md#storage-ownership-and-deletion) for the checks.
 Hidden foreign backing dependencies are not detected: never attach test volumes to other guests or use them as backing images.
 

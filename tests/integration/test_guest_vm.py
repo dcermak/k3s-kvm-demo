@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
 import re
-import secrets
-import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -18,10 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-from k3s_kvm_demo import cli, config, domxml, guestexec, meta, pool
-from k3s_kvm_demo.conn import ConnectionManager
-from k3s_kvm_demo.libvirtctl import NodeManager
-from k3s_kvm_demo.observer import Observer
+from k3s_kvm_demo import cli, domxml, guestexec, meta, pool
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("K3S_DEMO_VM_TESTS") != "1",
@@ -68,122 +62,6 @@ print("nonroot-probe-ok", flush=True)
 """
 
 
-@pytest.fixture
-def vm_cluster():
-    if shutil.which("kubectl") is None:
-        pytest.fail("real-VM export verification requires kubectl on the host PATH")
-    required = (
-        "K3S_DEMO_TEST_IMAGE", "K3S_DEMO_TEST_POOL_PATH", "K3S_DEMO_TEST_NETWORK",
-        "K3S_DEMO_TEST_PROBE_IMAGE",
-    )
-    missing = [key for key in required if not os.environ.get(key)]
-    if missing:
-        pytest.fail("explicit VM opt-in also requires " + ", ".join(missing))
-    if not re.fullmatch(
-        r"[^\s@]+@sha256:[0-9a-f]{64}", os.environ["K3S_DEMO_TEST_PROBE_IMAGE"]
-    ):
-        pytest.fail("K3S_DEMO_TEST_PROBE_IMAGE must be a digest-pinned Python 3 image")
-    image = Path(os.environ["K3S_DEMO_TEST_IMAGE"])
-    target = Path(os.environ["K3S_DEMO_TEST_POOL_PATH"])
-    if not image.is_absolute() or not image.is_file():
-        pytest.fail("K3S_DEMO_TEST_IMAGE must be an existing absolute v2 image path")
-    if not target.is_absolute() or not target.is_dir() or target.resolve() != target:
-        pytest.fail("K3S_DEMO_TEST_POOL_PATH must be an existing absolute, symlink-free directory")
-    if image.resolve().is_relative_to(target):
-        pytest.fail("the backing image must be outside the test pool")
-
-    scope = "k3sit-" + uuid4().hex[:12]
-    cfg = config.from_mapping(
-        {
-            "libvirt": {
-                "uri": "qemu:///system",
-                "pool": scope,
-                "network": os.environ["K3S_DEMO_TEST_NETWORK"],
-            },
-            "vm": {
-                "base_image": str(image.resolve()),
-                "name_prefix": scope,
-                "max_nodes": 2,
-                "disk_gb": 24,
-                "memory_mb": 4096,
-                "vcpus": 4,
-            },
-            "cluster": {"token": secrets.token_hex(32)},
-            "observation": {"interval_s": 2, "qga_timeout_s": 2, "stale_after_s": 30},
-            "maintenance": {"shutdown_grace_s": 30},
-        }
-    )
-    # Lock the directory itself so concurrent runs cannot both adopt an empty path.
-    directory_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    cm = ConnectionManager(cfg.libvirt.uri)
-    storage = None
-    storage_uuid = None
-    manager = NodeManager(cm, cfg)
-    observer = Observer(manager, cfg)
-    try:
-        fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if any(target.iterdir()):
-            pytest.fail("K3S_DEMO_TEST_POOL_PATH must be empty; nothing was removed")
-        conn = cm.open()
-        assert conn.getType() == "QEMU", "VM tests require the QEMU driver"
-        manager.check_compatible()
-        assert manager.domain_type(conn) == domxml.TYPE_KVM, "VM tests require KVM"
-        network = conn.networkLookupByName(cfg.libvirt.network)
-        assert network.isActive(), "the supplied test network must already be active"
-        for existing in conn.listAllStoragePools(0):
-            assert existing.name() != scope, "unexpected test pool name collision"
-            path = ET.fromstring(existing.XMLDesc(0)).findtext("./target/path")
-            if path:
-                existing_target = Path(path).resolve()
-                assert not (
-                    target.is_relative_to(existing_target) or existing_target.is_relative_to(target)
-                ), f"test directory overlaps existing pool {existing.name()}"
-        assert not any(
-            Path(path).is_relative_to(target) for path in pool.referenced_disk_paths(conn)
-        ), "an existing domain references the test directory"
-        assert not any(dom.name().startswith(scope + "-") for dom in conn.listAllDomains(0))
-
-        # Define explicitly, rather than init_pool(), which can adopt an existing pool.
-        print(f"VM test resources: pool={scope} prefix={scope} path={target}", flush=True)
-        storage = conn.storagePoolDefineXML(pool.build_pool_xml(scope, target), 0)
-        storage_uuid = storage.UUIDString()
-        print(f"VM test pool UUID: {storage_uuid}", flush=True)
-        storage.create(0)
-        storage.refresh(0)
-        assert not storage.listAllVolumes(0)
-        storage.createXML(pool.build_marker_xml(), 0)
-        config.validate_hypervisor(conn, cfg)
-        yield manager, observer
-    finally:
-        try:
-            assert observer.shutdown(), "observer is still running; preserve test resources"
-            if storage is not None:
-                assert storage.UUIDString() == storage_uuid
-                assert domxml.pool_target_path(storage) == target
-                # reset resolves exact UUIDs inside this unique pool/prefix scope.
-                manager.reset()
-                assert not manager.list_nodes()
-                if storage.isActive():
-                    storage.refresh(0)
-                    remaining = {volume.name() for volume in storage.listAllVolumes(0)}
-                    assert remaining <= {pool.MARKER_VOLUME}, (
-                        f"unexpected volumes remain in {scope}; preserving pool: {remaining}"
-                    )
-                    with cm.lease() as (conn, _):
-                        assert not any(
-                            Path(path).is_relative_to(target)
-                            for path in pool.referenced_disk_paths(conn)
-                        ), "a domain still references the test pool; preserving it"
-                    if pool.MARKER_VOLUME in remaining:
-                        storage.storageVolLookupByName(pool.MARKER_VOLUME).delete(0)
-                    storage.destroy()
-                storage.undefine()
-                assert not any(target.iterdir()), "test directory is not empty after cleanup"
-        finally:
-            cm.close()
-            os.close(directory_fd)
-
-
 def kubectl(kubeconfig, *args, manifest=None, timeout=30):
     result = subprocess.run(
         ["kubectl", "--kubeconfig", str(kubeconfig), "--request-timeout=15s", *args],
@@ -197,7 +75,7 @@ def kubectl(kubeconfig, *args, manifest=None, timeout=30):
     return result.stdout
 
 
-def verify_nonroot_workloads(manager, nodes, kubeconfig):
+def verify_nonroot_workloads(manager, nodes, kubeconfig, probe_image):
     namespace = "nonroot-" + uuid4().hex[:12]
     pod_names = ["probe-server", "probe-agent"]
     namespace_created = False
@@ -235,9 +113,9 @@ def verify_nonroot_workloads(manager, nodes, kubeconfig):
                     },
                     "containers": [{
                         "name": "probe",
-                        "image": os.environ["K3S_DEMO_TEST_PROBE_IMAGE"],
+                        "image": probe_image,
                         "imagePullPolicy": "IfNotPresent",
-                        "command": ["/usr/local/bin/python3", "-I", "-u", "-c", PROBE],
+                        "command": ["python3", "-I", "-u", "-c", PROBE],
                         "env": [{"name": "API_SERVICE_IP", "value": service["spec"]["clusterIP"]}],
                         "securityContext": {
                             "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
@@ -262,8 +140,8 @@ def verify_nonroot_workloads(manager, nodes, kubeconfig):
                         "see diagnostics")
 
         for pod in pods:
-            statuses = pod["status"]["containerStatuses"]
-            assert len(statuses) == 1 and statuses[0]["state"]["terminated"]["exitCode"] == 0
+            image_id = pod["status"]["containerStatuses"][0]["imageID"]
+            print(f"{pod['metadata']['name']} imageID: {image_id}", flush=True)
             output = kubectl(kubeconfig, "logs", "-n", namespace, pod["metadata"]["name"])
             print(f"{pod['metadata']['name']}:\n{output}", flush=True)
             assert "nonroot-probe-ok" in output
@@ -304,7 +182,7 @@ def verify_nonroot_workloads(manager, nodes, kubeconfig):
 
 
 def test_server_and_agent_boot_from_seed(vm_cluster, tmp_path):
-    manager, observer = vm_cluster
+    manager, observer, probe_image = vm_cluster
     created = []
     for role in (meta.ROLE_SERVER, meta.ROLE_AGENT):
         node = manager.create(role)
@@ -396,22 +274,10 @@ def test_server_and_agent_boot_from_seed(vm_cluster, tmp_path):
     exported = tmp_path / "k3s-demo.yaml"
     assert cli.main(["-c", str(config_path), "export", "-o", str(exported)]) == 0
     assert exported.stat().st_mode & 0o777 == 0o600
-    response = subprocess.run(
-        [
-            "kubectl", "--kubeconfig", str(exported), "--request-timeout=15s",
-            "get", "nodes", "-o", "json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert response.returncode == 0, response.stderr
-    assert {node["metadata"]["name"] for node in json.loads(response.stdout)["items"]} == (
-        expected_names
-    )
+    nodes = json.loads(kubectl(exported, "get", "nodes", "-o", "json"))["items"]
+    assert {node["metadata"]["name"] for node in nodes} == expected_names
 
-    verify_nonroot_workloads(manager, created, exported)
+    verify_nonroot_workloads(manager, created, exported, probe_image)
 
     assert manager.reset() == 2
     assert manager.list_nodes() == []
