@@ -27,12 +27,11 @@ jobs:
           sudo apt-get install -y qemu-system-x86 qemu-utils podman
           sudo pipx ensurepath
           sudo pipx install kiwi
-          sudo pipx inject kiwi kiwi-boxed-plugin
 
       - name: Build guest image
         working-directory: image
         run: |
-          sudo /opt/pipx_bin/kiwi-ng system boxbuild --box=tumbleweed -- kiwi --description . --target-dir /var/tmp/kiwi/
+          sudo /opt/pipx_bin/kiwi-ng system boxbuild --box=tumbleweed kiwi --description . --target-dir /var/tmp/kiwi/
           sudo cp /var/tmp/kiwi/*.qcow2 "$GITHUB_WORKSPACE/k3s-image.qcow2"
           sudo chown $(id -u):$(id -g) "$GITHUB_WORKSPACE/k3s-image.qcow2"
 
